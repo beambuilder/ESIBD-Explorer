@@ -100,7 +100,7 @@ The DMMR-8 picoammeter plugin is at `esibd/devices/dmmr8/dmmr8.py` — see `.cla
 The AMPR-12 DC voltage plugin is at `esibd/devices/ampr12/ampr12.py` — see `.claude/ampr.md` for implementation details.
 It manages two AMPR units (AMPR1000/AMPR500) via the MIPS multi-COM pattern. Supports monitor readback, On/Off PSU toggle, and equation-based linked voltages.
 
-COM port assignments are centralized in `esibd/devices/com_ports.json`. Device plugins read from this file via `getComPort()` from `esibd/devices/com_helper.py` instead of hardcoding COM port defaults. Update the JSON when COM ports change — no need to edit individual plugins.
+COM port assignments are centralized in `esibd/devices/com_ports.json` (all lab devices, COM3–COM27). Device plugins read from this file via `getComPort()` from `esibd/devices/com_helper.py`. The JSON key for the DMMR-8 is `pA`. Update the JSON when COM ports change — no need to edit individual plugins.
 
 Key gotcha: **Settings > General > Test Mode** must be unchecked for real hardware communication.
 When Test Mode is on, `fakeInitialization()` and `fakeNumbers()` run instead of real hardware code (`core.py:5483,5605`).

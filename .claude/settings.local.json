@@ -5,7 +5,8 @@
       "Bash(grep -E \"\\\\.\\(md|txt|ipynb\\)$\")",
       "Bash(xargs grep:*)",
       "Bash(find /c/Users/Niclas/Desktop/ESIBD-Explorer -type f \\\\\\(-name *.ini -o -name *.h5 \\\\\\))",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(ruff check:*)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Niclas\\Desktop\\esibd_bs"
