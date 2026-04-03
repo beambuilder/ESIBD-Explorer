@@ -1,4 +1,5 @@
 # pylint: disable=[missing-module-docstring]  # see class docstrings
+from threading import Thread
 from typing import cast
 
 import numpy as np
@@ -86,7 +87,9 @@ class ChillerChannel(Channel):
 
     def setPumpLevel(self) -> None:
         """Set the pump level on the chiller."""
-        self.channelParent.controller.setPumpLevel(self)
+        controller = self.channelParent.controller
+        if not getTestMode() and controller.initialized:
+            Thread(target=controller.setPumpLevel, args=(self,), name=f'{self.channelParent.name} setPumpThread').start()
 
     def monitorChanged(self) -> None:
         self.updateWarningState(self.enabled and self.channelParent.controller.acquiring
@@ -112,12 +115,10 @@ class ChillerController(DeviceController):
         """Initialize COM port list."""
         self.COMs = self.controllerParent.getCOMs() or [23]
 
-    def initializeValues(self, reset: bool = False) -> None:  # noqa: ARG002
+    def initializeValues(self, reset: bool = False) -> None:
         """Initialize values array: one entry per channel for monitor readback."""
         self.COMs = self.controllerParent.getCOMs() or [23]
-        channels = self.controllerParent.getChannels()
-        if channels:
-            self.values = np.full(len(channels), fill_value=np.nan, dtype=np.float32)
+        super().initializeValues(reset=reset)
 
     def runInitialization(self) -> None:
         self.initCOMs()
@@ -152,14 +153,12 @@ class ChillerController(DeviceController):
         if chiller is None:
             return
         temp = channel.value if (channel.enabled and self.controllerParent.isOn()) else 20
-        with self.lock.acquire_timeout(1, timeoutMessage=f'Cannot acquire lock to set {channel.name}.') as lock_acquired:
-            if lock_acquired:
-                try:
-                    chiller.set_temperature(temp)
-                    self.print(f'Set {channel.name} to {temp:.1f} °C (COM{channel.com})', flag=PRINT.TRACE)
-                except Exception as e:  # noqa: BLE001
-                    self.print(f'Error setting {channel.name}: {e}', flag=PRINT.WARNING)
-                    self.errorCount += 1
+        try:
+            chiller.set_temperature(temp)
+            self.print(f'Set {channel.name} to {temp:.1f} °C (COM{channel.com})', flag=PRINT.TRACE)
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Error setting {channel.name}: {e}', flag=PRINT.WARNING)
+            self.errorCount += 1
 
     def readNumbers(self) -> None:
         """Read current temperatures from all chillers."""
@@ -177,11 +176,13 @@ class ChillerController(DeviceController):
                     self.errorCount += 1
 
     def fakeNumbers(self) -> None:
+        if self.values is None:
+            return
         for i, channel in enumerate(self.controllerParent.getChannels()):
             if channel.enabled and channel.real:
                 if self.controllerParent.isOn():
-                    # Exponentially approach target temperature with small fluctuation
-                    self.values[i] = max((self.values[i] + self.rng.uniform(-0.2, 0.2)) + 0.05 * (channel.value - self.values[i]), -10)
+                    current = self.values[i] if not np.isnan(self.values[i]) else channel.value
+                    self.values[i] = max(current + self.rng.uniform(-0.2, 0.2) + 0.05 * (channel.value - current), -10)
                 else:
                     self.values[i] = 22 + self.rng.uniform(-0.5, 0.5)
 
@@ -217,13 +218,11 @@ class ChillerController(DeviceController):
         chiller = self.chillers.get(channel.com)
         if chiller is None:
             return
-        with self.lock.acquire_timeout(1, timeoutMessage=f'Cannot acquire lock for pump level on {channel.name}.') as lock_acquired:
-            if lock_acquired:
-                try:
-                    chiller.set_pump_level(channel.pumpLevel)
-                    self.print(f'Set {channel.name} pump level to {channel.pumpLevel} (COM{channel.com})', flag=PRINT.TRACE)
-                except Exception as e:  # noqa: BLE001
-                    self.print(f'Error setting pump level on {channel.name}: {e}', flag=PRINT.WARNING)
+        try:
+            chiller.set_pump_level(channel.pumpLevel)
+            self.print(f'Set {channel.name} pump level to {channel.pumpLevel} (COM{channel.com})', flag=PRINT.TRACE)
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Error setting pump level on {channel.name}: {e}', flag=PRINT.WARNING)
 
     def closeCommunication(self) -> None:
         super().closeCommunication()
