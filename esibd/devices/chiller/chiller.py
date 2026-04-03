@@ -166,10 +166,9 @@ class ChillerController(DeviceController):
         chiller = self.chillers.get(channel.com)
         if chiller is None:
             return
-        temp = channel.value if (channel.enabled and self.controllerParent.isOn()) else 20
         try:
-            chiller.set_temperature(temp)
-            self.print(f'Set {channel.name} to {temp:.1f} °C (COM{channel.com})')
+            chiller.set_temperature(channel.value)
+            self.print(f'Set {channel.name} to {channel.value:.1f} °C (COM{channel.com})')
         except Exception as e:  # noqa: BLE001
             self.print(f'Error setting {channel.name}: {e}', flag=PRINT.WARNING)
             self.errorCount += 1
