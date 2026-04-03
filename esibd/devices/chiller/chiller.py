@@ -67,12 +67,14 @@ class ChillerChannel(Channel):
 
     COM = 'COM'
     PUMP = 'Pump Level'
+    RUNNING = 'Running'
     channelParent: Chiller
 
     def getDefaultChannel(self) -> dict[str, dict]:
 
         self.com: int
         self.pumpLevel: int
+        self.running: bool
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'T (°C)'
@@ -81,10 +83,14 @@ class ChillerChannel(Channel):
         channel[self.PUMP] = parameterDict(value=4, minimum=1, maximum=6, parameterType=PARAMETERTYPE.INT, advanced=False,
                                            header='Pump', toolTip='Pump level (1-6).', attr='pumpLevel',
                                            instantUpdate=False, event=self.setPumpLevel)
+        channel[self.RUNNING] = parameterDict(value=False, parameterType=PARAMETERTYPE.BOOL, advanced=False,
+                                              header='Run', toolTip='Start/stop the chiller.', attr='running',
+                                              event=self.setRunning)
         return channel
 
     def setDisplayedParameters(self) -> None:
         super().setDisplayedParameters()
+        self.insertDisplayedParameter(self.RUNNING, before=self.PUMP)
         self.insertDisplayedParameter(self.PUMP, before=self.MONITOR)
         self.displayedParameters.append(self.COM)
 
@@ -97,6 +103,12 @@ class ChillerChannel(Channel):
     def valueChanged(self) -> None:
         super().valueChanged()
         self.setTemperature()
+
+    def setRunning(self) -> None:
+        """Start or stop the chiller."""
+        controller = self.channelParent.controller
+        if not getTestMode() and controller.initialized:
+            Thread(target=controller.setRunning, args=(self,), name=f'{self.channelParent.name} setRunThread').start()
 
     def setPumpLevel(self) -> None:
         """Set the pump level on the chiller."""
@@ -205,6 +217,25 @@ class ChillerController(DeviceController):
             for channel in self.controllerParent.getChannels():
                 if channel.real:
                     self.applyValueFromThread(channel)
+
+    def setRunning(self, channel: ChillerChannel) -> None:
+        """Start or stop a chiller.
+
+        :param channel: The channel for which to start/stop.
+        :type channel: ChillerChannel
+        """
+        chiller = self.chillers.get(channel.com)
+        if chiller is None:
+            return
+        try:
+            if channel.running:
+                chiller.start_device()
+                self.print(f'Started {channel.name} (COM{channel.com}).')
+            else:
+                chiller.stop_device()
+                self.print(f'Stopped {channel.name} (COM{channel.com}).')
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Error {"starting" if channel.running else "stopping"} {channel.name}: {e}', flag=PRINT.WARNING)
 
     def setPumpLevel(self, channel: ChillerChannel) -> None:
         """Set the pump level on a chiller.
