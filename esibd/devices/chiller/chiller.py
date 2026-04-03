@@ -90,8 +90,8 @@ class ChillerChannel(Channel):
 
     def setDisplayedParameters(self) -> None:
         super().setDisplayedParameters()
-        self.insertDisplayedParameter(self.RUNNING, before=self.PUMP)
         self.insertDisplayedParameter(self.PUMP, before=self.MONITOR)
+        self.insertDisplayedParameter(self.RUNNING, before=self.PUMP)
         self.displayedParameters.append(self.COM)
 
     def setTemperature(self) -> None:
