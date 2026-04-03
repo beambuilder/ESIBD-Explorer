@@ -99,6 +99,8 @@ ESIBD Explorer plugins under `esibd/devices/` are thin wrappers that import from
 The DMMR-8 picoammeter plugin is at `esibd/devices/dmmr8/dmmr8.py` — see `.claude/pA.md` for implementation details.
 The AMPR-12 DC voltage plugin is at `esibd/devices/ampr12/ampr12.py` — see `.claude/ampr.md` for implementation details.
 It manages two AMPR units (AMPR1000/AMPR500) via the MIPS multi-COM pattern. Supports monitor readback, On/Off PSU toggle, and equation-based linked voltages.
+The Lauda chiller plugin is at `esibd/devices/chiller/chiller.py` — see `.claude/chiller.md` for implementation details.
+It manages 3 chillers (Chiller_A/B/C) via the same multi-COM pattern. Supports temperature setpoint, monitor readback, pump level, and start/stop.
 
 COM port assignments are centralized in `esibd/devices/com_ports.json` (all lab devices, COM3–COM27). Device plugins read from this file via `getComPort()` from `esibd/devices/com_helper.py`. The JSON key for the DMMR-8 is `pA`. Update the JSON when COM ports change — no need to edit individual plugins.
 
