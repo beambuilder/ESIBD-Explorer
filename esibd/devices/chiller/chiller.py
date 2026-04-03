@@ -14,6 +14,9 @@ def providePlugins() -> 'list[type[Plugin]]':
     return [Chiller]
 
 
+BAUDRATE = 115200
+
+
 class Chiller(Device):
     """Lauda chiller temperature controller.
 
@@ -127,8 +130,8 @@ class ChillerController(DeviceController):
 
             self.chillers = {}
             for com in self.COMs:
-                self.print(f'Connecting to chiller on COM{com}...')
-                chiller = ChillerDev(device_id=f'chiller_com{com}', port=f'COM{com}', baudrate=9600)
+                self.print(f'Connecting to chiller on COM{com} (baud={BAUDRATE})...')
+                chiller = ChillerDev(device_id=f'chiller_com{com}', port=f'COM{com}', baudrate=BAUDRATE)
                 if not chiller.connect():
                     self.print(f'Failed to connect to chiller on COM{com}.', flag=PRINT.ERROR)
                     return
@@ -139,6 +142,7 @@ class ChillerController(DeviceController):
                 for com, chiller in self.chillers.items():
                     try:
                         chiller.start_device()
+                        self.print(f'Started chiller on COM{com}.')
                     except Exception as e:  # noqa: BLE001
                         self.print(f'Failed to start chiller on COM{com}: {e}', flag=PRINT.WARNING)
 
@@ -155,7 +159,7 @@ class ChillerController(DeviceController):
         temp = channel.value if (channel.enabled and self.controllerParent.isOn()) else 20
         try:
             chiller.set_temperature(temp)
-            self.print(f'Set {channel.name} to {temp:.1f} °C (COM{channel.com})', flag=PRINT.TRACE)
+            self.print(f'Set {channel.name} to {temp:.1f} °C (COM{channel.com})')
         except Exception as e:  # noqa: BLE001
             self.print(f'Error setting {channel.name}: {e}', flag=PRINT.WARNING)
             self.errorCount += 1
@@ -175,24 +179,6 @@ class ChillerController(DeviceController):
                     self.print(f'Error reading chiller on COM{ch.com}: {e}', flag=PRINT.ERROR)
                     self.errorCount += 1
 
-    def fakeNumbers(self) -> None:
-        if self.values is None:
-            return
-        for i, channel in enumerate(self.controllerParent.getChannels()):
-            if channel.enabled and channel.real:
-                if self.controllerParent.isOn():
-                    current = self.values[i] if not np.isnan(self.values[i]) else channel.value
-                    self.values[i] = max(current + self.rng.uniform(-0.2, 0.2) + 0.05 * (channel.value - current), -10)
-                else:
-                    self.values[i] = 22 + self.rng.uniform(-0.5, 0.5)
-
-    def updateValues(self) -> None:
-        if self.values is None:
-            return
-        for i, channel in enumerate(self.controllerParent.getChannels()):
-            if channel.enabled and channel.real and i < len(self.values):
-                channel.monitor = np.nan if channel.waitToStabilize else self.values[i]
-
     def toggleOn(self) -> None:
         super().toggleOn()
         on = self.controllerParent.isOn()
@@ -200,8 +186,10 @@ class ChillerController(DeviceController):
             try:
                 if on:
                     chiller.start_device()
+                    self.print(f'Started chiller on COM{com}.')
                 else:
                     chiller.stop_device()
+                    self.print(f'Stopped chiller on COM{com}.')
             except Exception as e:  # noqa: BLE001
                 self.print(f'Error {"starting" if on else "stopping"} chiller on COM{com}: {e}', flag=PRINT.ERROR)
         if on:
@@ -220,7 +208,7 @@ class ChillerController(DeviceController):
             return
         try:
             chiller.set_pump_level(channel.pumpLevel)
-            self.print(f'Set {channel.name} pump level to {channel.pumpLevel} (COM{channel.com})', flag=PRINT.TRACE)
+            self.print(f'Set {channel.name} pump level to {channel.pumpLevel} (COM{channel.com})')
         except Exception as e:  # noqa: BLE001
             self.print(f'Error setting pump level on {channel.name}: {e}', flag=PRINT.WARNING)
 

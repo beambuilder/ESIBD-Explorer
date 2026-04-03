@@ -15,7 +15,7 @@ The Chiller class is pip-installed from `esibd_bs` (`pip install -e .`).
 Import path: `from devices.chiller import Chiller` (via `src/devices/chiller/__init__.py`).
 
 Single class — no base/derived split like the CGC devices.
-Communication: RS-232 serial, Lauda ASCII protocol, 9600 baud, `\r\n` terminators.
+Communication: RS-232 serial, Lauda ASCII protocol, 115200 baud, `\r\n` terminators.
 Write commands expect "OK" response; read commands return numeric strings.
 
 ## Plugin Architecture
