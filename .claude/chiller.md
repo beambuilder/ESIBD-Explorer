@@ -15,7 +15,7 @@ The Chiller class is pip-installed from `esibd_bs` (`pip install -e .`).
 Import path: `from devices.chiller import Chiller` (via `src/devices/chiller/__init__.py`).
 
 Single class — no base/derived split like the CGC devices.
-Communication: RS-232 serial, Lauda ASCII protocol, 9600 baud, `\r\n` terminators.
+Communication: RS-232 serial, Lauda ASCII protocol, 115200 baud, `\r\n` terminators.
 Write commands expect "OK" response; read commands return numeric strings.
 
 ## Plugin Architecture
@@ -25,31 +25,55 @@ mapped in `ChillerController.chillers` dict.
 
 Three classes:
 - `Chiller(Device)`: INPUTDEVICE, unit='°C', monitors + on/off logic
-- `ChillerChannel(Channel)`: One per physical chiller, has COM port and Pump Level params
+- `ChillerChannel(Channel)`: One per physical chiller, has COM, Pump Level, and Running params
 - `ChillerController(DeviceController)`: Manages all chiller instances
 
 ## Initialization Sequence (runInitialization)
 
-1. `ChillerDev(device_id, port=f'COM{com}', baudrate=9600)` — create instance
+1. `ChillerDev(device_id, port=f'COM{com}', baudrate=115200)` — create instance
 2. `chiller.connect()` — opens serial port
 3. If device is On: `chiller.start_device()` — starts pumping and cooling
 4. Emit `initCompleteSignal`
 
+## Channel Parameters
+
+Each channel has:
+- **T (°C)** — target temperature setpoint
+- **Run** — boolean tickbox: tick to `start_device()`, untick to `stop_device()`
+- **Pump** — pump level (1–6), non-instant update (user must confirm)
+- **Monitor** — live readback from `read_temp()`
+- **COM** — COM port number (advanced)
+
+## Direct Command Pipeline
+
+All user-triggered commands (temperature, pump level, start/stop) use the same
+direct pipeline that bypasses the framework's `applyValueFromThread` chain:
+
+1. UI event triggers channel method (`valueChanged`, `setRunning`, `setPumpLevel`)
+2. Channel method creates a `Thread` targeting the controller method
+3. Controller method calls the esibd_bs `Chiller` serial method directly
+
+This pattern was adopted because the framework's pipeline (`applyValueFromThread`)
+has multiple conditions that silently fail for input devices. The direct approach
+matches how pump level always worked reliably.
+
 ## Temperature Control
 
-- `applyValue` → `chiller.set_temperature(target)` — sets setpoint in °C
+- `valueChanged` → `setTemperature` → Thread → `controller.applyValue` → `chiller.set_temperature(channel.value)`
 - `readNumbers` → `chiller.read_temp()` — reads current bath temperature per channel
-- When off, `applyValue` defaults to 20°C (safe room-temp fallback)
+- Always sends `channel.value` directly (no conditional fallback)
 
 ## Pump Level
 
 Per-channel pump level (1–6), set via `chiller.set_pump_level(level)`.
 Triggered from the channel UI (non-instant update, user must confirm).
 
-## On/Off Toggle
+## Start/Stop (Running Tickbox)
 
-- On: `chiller.start_device()` then apply all channel setpoints
-- Off: `chiller.stop_device()`
+Per-channel boolean "Run" checkbox:
+- Tick: `chiller.start_device()` — starts pumping and cooling
+- Untick: `chiller.stop_device()` — stops pumping and cooling
+- Cooling mode is set manually on the chiller (AUTO) and persists — no need to set via plugin
 
 ## Shutdown Sequence (closeCommunication)
 

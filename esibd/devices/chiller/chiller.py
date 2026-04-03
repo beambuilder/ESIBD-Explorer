@@ -1,4 +1,5 @@
 # pylint: disable=[missing-module-docstring]  # see class docstrings
+from threading import Thread
 from typing import cast
 
 import numpy as np
@@ -11,6 +12,9 @@ from esibd.plugins import Device, Plugin
 def providePlugins() -> 'list[type[Plugin]]':
     """Return list of provided plugins. Indicates that this module provides plugins."""
     return [Chiller]
+
+
+BAUDRATE = 115200
 
 
 class Chiller(Device):
@@ -63,12 +67,14 @@ class ChillerChannel(Channel):
 
     COM = 'COM'
     PUMP = 'Pump Level'
+    RUNNING = 'Running'
     channelParent: Chiller
 
     def getDefaultChannel(self) -> dict[str, dict]:
 
         self.com: int
         self.pumpLevel: int
+        self.running: bool
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'T (°C)'
@@ -77,16 +83,38 @@ class ChillerChannel(Channel):
         channel[self.PUMP] = parameterDict(value=4, minimum=1, maximum=6, parameterType=PARAMETERTYPE.INT, advanced=False,
                                            header='Pump', toolTip='Pump level (1-6).', attr='pumpLevel',
                                            instantUpdate=False, event=self.setPumpLevel)
+        channel[self.RUNNING] = parameterDict(value=False, parameterType=PARAMETERTYPE.BOOL, advanced=False,
+                                              header='Run', toolTip='Start/stop the chiller.', attr='running',
+                                              event=self.setRunning)
         return channel
 
     def setDisplayedParameters(self) -> None:
         super().setDisplayedParameters()
         self.insertDisplayedParameter(self.PUMP, before=self.MONITOR)
+        self.insertDisplayedParameter(self.RUNNING, before=self.PUMP)
         self.displayedParameters.append(self.COM)
+
+    def setTemperature(self) -> None:
+        """Set the target temperature on the chiller."""
+        controller = self.channelParent.controller
+        if not getTestMode() and controller.initialized:
+            Thread(target=controller.applyValue, args=(self,), name=f'{self.channelParent.name} setTempThread').start()
+
+    def valueChanged(self) -> None:
+        super().valueChanged()
+        self.setTemperature()
+
+    def setRunning(self) -> None:
+        """Start or stop the chiller."""
+        controller = self.channelParent.controller
+        if not getTestMode() and controller.initialized:
+            Thread(target=controller.setRunning, args=(self,), name=f'{self.channelParent.name} setRunThread').start()
 
     def setPumpLevel(self) -> None:
         """Set the pump level on the chiller."""
-        self.channelParent.controller.setPumpLevel(self)
+        controller = self.channelParent.controller
+        if not getTestMode() and controller.initialized:
+            Thread(target=controller.setPumpLevel, args=(self,), name=f'{self.channelParent.name} setPumpThread').start()
 
     def monitorChanged(self) -> None:
         self.updateWarningState(self.enabled and self.channelParent.controller.acquiring
@@ -112,12 +140,10 @@ class ChillerController(DeviceController):
         """Initialize COM port list."""
         self.COMs = self.controllerParent.getCOMs() or [23]
 
-    def initializeValues(self, reset: bool = False) -> None:  # noqa: ARG002
+    def initializeValues(self, reset: bool = False) -> None:
         """Initialize values array: one entry per channel for monitor readback."""
         self.COMs = self.controllerParent.getCOMs() or [23]
-        channels = self.controllerParent.getChannels()
-        if channels:
-            self.values = np.full(len(channels), fill_value=np.nan, dtype=np.float32)
+        super().initializeValues(reset=reset)
 
     def runInitialization(self) -> None:
         self.initCOMs()
@@ -126,8 +152,8 @@ class ChillerController(DeviceController):
 
             self.chillers = {}
             for com in self.COMs:
-                self.print(f'Connecting to chiller on COM{com}...')
-                chiller = ChillerDev(device_id=f'chiller_com{com}', port=f'COM{com}', baudrate=9600)
+                self.print(f'Connecting to chiller on COM{com} (baud={BAUDRATE})...')
+                chiller = ChillerDev(device_id=f'chiller_com{com}', port=f'COM{com}', baudrate=BAUDRATE)
                 if not chiller.connect():
                     self.print(f'Failed to connect to chiller on COM{com}.', flag=PRINT.ERROR)
                     return
@@ -138,6 +164,7 @@ class ChillerController(DeviceController):
                 for com, chiller in self.chillers.items():
                     try:
                         chiller.start_device()
+                        self.print(f'Started chiller on COM{com}.')
                     except Exception as e:  # noqa: BLE001
                         self.print(f'Failed to start chiller on COM{com}: {e}', flag=PRINT.WARNING)
 
@@ -151,15 +178,12 @@ class ChillerController(DeviceController):
         chiller = self.chillers.get(channel.com)
         if chiller is None:
             return
-        temp = channel.value if (channel.enabled and self.controllerParent.isOn()) else 20
-        with self.lock.acquire_timeout(1, timeoutMessage=f'Cannot acquire lock to set {channel.name}.') as lock_acquired:
-            if lock_acquired:
-                try:
-                    chiller.set_temperature(temp)
-                    self.print(f'Set {channel.name} to {temp:.1f} °C (COM{channel.com})', flag=PRINT.TRACE)
-                except Exception as e:  # noqa: BLE001
-                    self.print(f'Error setting {channel.name}: {e}', flag=PRINT.WARNING)
-                    self.errorCount += 1
+        try:
+            chiller.set_temperature(channel.value)
+            self.print(f'Set {channel.name} to {channel.value:.1f} °C (COM{channel.com})')
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Error setting {channel.name}: {e}', flag=PRINT.WARNING)
+            self.errorCount += 1
 
     def readNumbers(self) -> None:
         """Read current temperatures from all chillers."""
@@ -176,22 +200,6 @@ class ChillerController(DeviceController):
                     self.print(f'Error reading chiller on COM{ch.com}: {e}', flag=PRINT.ERROR)
                     self.errorCount += 1
 
-    def fakeNumbers(self) -> None:
-        for i, channel in enumerate(self.controllerParent.getChannels()):
-            if channel.enabled and channel.real:
-                if self.controllerParent.isOn():
-                    # Exponentially approach target temperature with small fluctuation
-                    self.values[i] = max((self.values[i] + self.rng.uniform(-0.2, 0.2)) + 0.05 * (channel.value - self.values[i]), -10)
-                else:
-                    self.values[i] = 22 + self.rng.uniform(-0.5, 0.5)
-
-    def updateValues(self) -> None:
-        if self.values is None:
-            return
-        for i, channel in enumerate(self.controllerParent.getChannels()):
-            if channel.enabled and channel.real and i < len(self.values):
-                channel.monitor = np.nan if channel.waitToStabilize else self.values[i]
-
     def toggleOn(self) -> None:
         super().toggleOn()
         on = self.controllerParent.isOn()
@@ -199,14 +207,35 @@ class ChillerController(DeviceController):
             try:
                 if on:
                     chiller.start_device()
+                    self.print(f'Started chiller on COM{com}.')
                 else:
                     chiller.stop_device()
+                    self.print(f'Stopped chiller on COM{com}.')
             except Exception as e:  # noqa: BLE001
                 self.print(f'Error {"starting" if on else "stopping"} chiller on COM{com}: {e}', flag=PRINT.ERROR)
         if on:
             for channel in self.controllerParent.getChannels():
                 if channel.real:
                     self.applyValueFromThread(channel)
+
+    def setRunning(self, channel: ChillerChannel) -> None:
+        """Start or stop a chiller.
+
+        :param channel: The channel for which to start/stop.
+        :type channel: ChillerChannel
+        """
+        chiller = self.chillers.get(channel.com)
+        if chiller is None:
+            return
+        try:
+            if channel.running:
+                chiller.start_device()
+                self.print(f'Started {channel.name} (COM{channel.com}).')
+            else:
+                chiller.stop_device()
+                self.print(f'Stopped {channel.name} (COM{channel.com}).')
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Error {"starting" if channel.running else "stopping"} {channel.name}: {e}', flag=PRINT.WARNING)
 
     def setPumpLevel(self, channel: ChillerChannel) -> None:
         """Set the pump level on a chiller.
@@ -217,13 +246,11 @@ class ChillerController(DeviceController):
         chiller = self.chillers.get(channel.com)
         if chiller is None:
             return
-        with self.lock.acquire_timeout(1, timeoutMessage=f'Cannot acquire lock for pump level on {channel.name}.') as lock_acquired:
-            if lock_acquired:
-                try:
-                    chiller.set_pump_level(channel.pumpLevel)
-                    self.print(f'Set {channel.name} pump level to {channel.pumpLevel} (COM{channel.com})', flag=PRINT.TRACE)
-                except Exception as e:  # noqa: BLE001
-                    self.print(f'Error setting pump level on {channel.name}: {e}', flag=PRINT.WARNING)
+        try:
+            chiller.set_pump_level(channel.pumpLevel)
+            self.print(f'Set {channel.name} pump level to {channel.pumpLevel} (COM{channel.com})')
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Error setting pump level on {channel.name}: {e}', flag=PRINT.WARNING)
 
     def closeCommunication(self) -> None:
         super().closeCommunication()
