@@ -88,6 +88,16 @@ class ChillerChannel(Channel):
         self.insertDisplayedParameter(self.PUMP, before=self.MONITOR)
         self.displayedParameters.append(self.COM)
 
+    def setTemperature(self) -> None:
+        """Set the target temperature on the chiller."""
+        controller = self.channelParent.controller
+        if not getTestMode() and controller.initialized:
+            Thread(target=controller.applyValue, args=(self,), name=f'{self.channelParent.name} setTempThread').start()
+
+    def valueChanged(self) -> None:
+        super().valueChanged()
+        self.setTemperature()
+
     def setPumpLevel(self) -> None:
         """Set the pump level on the chiller."""
         controller = self.channelParent.controller
