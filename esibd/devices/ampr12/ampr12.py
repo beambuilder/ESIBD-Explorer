@@ -1,4 +1,5 @@
 # pylint: disable=[missing-module-docstring]  # see class docstrings
+import time
 from typing import cast
 
 import numpy as np
@@ -135,11 +136,27 @@ class VoltageController(DeviceController):
                 self.amprs[com] = ampr
                 self.print(f'AMPR-12 on COM{com} connected.')
 
+                # Discover present modules so we can warn if a configured channel points at a missing module.
+                present_status, _, max_module, presence_list = ampr.get_module_presence()
+                if present_status == ampr.NO_ERR:
+                    present_modules = [i for i in range(max_module + 1) if presence_list[i] == ampr.MODULE_PRESENT]
+                    self.print(f'AMPR-12 on COM{com}: modules present {present_modules}')
+                    configured_modules = {ch.module for ch in self.controllerParent.getChannels() if ch.real and ch.com == com}
+                    missing = configured_modules - set(present_modules)
+                    if missing:
+                        self.print(f'AMPR-12 on COM{com}: configured channels reference missing modules {sorted(missing)}', flag=PRINT.WARNING)
+                else:
+                    self.print(f'AMPR-12 on COM{com}: get_module_presence failed (status {present_status})', flag=PRINT.WARNING)
+
             if self.controllerParent.isOn():
                 for com, ampr in self.amprs.items():
-                    status = ampr.enable_psu(True)
-                    if status != ampr.NO_ERR:
-                        self.print(f'Failed to enable PSU on COM{com}: status {status}', flag=PRINT.WARNING)
+                    psu_status, enabled = ampr.enable_psu(True)
+                    if psu_status != ampr.NO_ERR:
+                        self.print(f'Failed to enable PSU on COM{com}: status {psu_status}', flag=PRINT.WARNING)
+                    else:
+                        self.print(f'AMPR-12 on COM{com}: PSU enabled ({enabled})')
+                # Give the device a moment to settle before set_module_voltage calls.
+                time.sleep(0.2)
 
             self.signalComm.initCompleteSignal.emit()
         except Exception as e:  # noqa: BLE001
@@ -210,12 +227,16 @@ class VoltageController(DeviceController):
         on = self.controllerParent.isOn()
         for com, ampr in self.amprs.items():
             try:
-                status = ampr.enable_psu(on)
-                if status != ampr.NO_ERR:
-                    self.print(f'Failed to {"enable" if on else "disable"} PSU on COM{com}: status {status}', flag=PRINT.WARNING)
+                psu_status, enabled = ampr.enable_psu(on)
+                if psu_status != ampr.NO_ERR:
+                    self.print(f'Failed to {"enable" if on else "disable"} PSU on COM{com}: status {psu_status}', flag=PRINT.WARNING)
+                else:
+                    self.print(f'AMPR-12 on COM{com}: PSU {"enabled" if enabled else "disabled"}')
             except Exception as e:  # noqa: BLE001
                 self.print(f'Error toggling PSU on COM{com}: {e}', flag=PRINT.ERROR)
         if on:
+            # Give the device a moment to settle before pushing channel values.
+            time.sleep(0.2)
             for channel in self.controllerParent.getChannels():
                 if channel.real:
                     self.applyValueFromThread(channel)
