@@ -61,12 +61,24 @@ class Beam(Scan):
             super().finalizeInit()
             self.interpolateAction = self.addStateAction(toolTipFalse='Interpolation on.', iconFalse=self.scan.makeIcon('interpolate_on.png'),
                                                          toolTipTrue='Interpolation off.', iconTrue=self.scan.makeIcon('interpolate_off.png'),
-                                                         before=self.copyAction, event=lambda: self.scan.plot(update=False, done=True), attr='interpolate')
+                                                         before=self.copyAction, event=self.interpolationChanged, attr='interpolate')
             self.axesAspectAction = self.addStateAction(toolTipFalse='Variable axes aspect ratio.', iconFalse=self.scan.getIcon(),
                                                         toolTipTrue='Fixed axes aspect ratio.', iconTrue=self.scan.getIcon(),  # defined in updateTheme
-                                                        before=self.copyAction, event=lambda: (self.initFig(), self.scan.plot(update=False, done=True)), attr='varAxesAspect')
+                                                        before=self.copyAction, event=self.axesAspectChanged, attr='varAxesAspect')
             self.updateTheme()  # set icons for axesAspectActions
             self.initFig()  # axis aspect may have changed
+
+        def interpolationChanged(self) -> None:
+            """Call when interpolation has changed."""
+            if self.scan.finished:
+                self.scan.plot(update=False, done=True)
+            else:
+                self.print('Interpolation will update when scan has finished.')
+
+        def axesAspectChanged(self) -> None:
+            """Call when axes aspect ratio has changed."""
+            self.initFig()
+            self.scan.plot(update=False, done=self.scan.finished)
 
         def initFig(self) -> None:
             if not self.axesAspectAction:
@@ -258,10 +270,12 @@ class Beam(Scan):
         x, y = self.getMeshgrid()  # data coordinates
         outputRecordingData = self.outputChannels[self.getOutputIndex()].getRecordingData()
         if outputRecordingData is not None:
+            z = outputRecordingData.ravel()
+            cmap = 'afmhot' if np.average(z) > 0 else 'afmhot_r'
             if update:
                 if self.display.cont and self.display.cbar:
-                    z = outputRecordingData.ravel()
                     self.display.cont.set_array(z.ravel())
+                    self.display.cont.set_cmap(cmap=cmap)
                     self.display.cbar.mappable.set_clim(vmin=np.min(z), vmax=np.max(z))
             else:
                 self.display.axes[0].clear()  # only update would be preferred but not yet possible with contourf
@@ -270,18 +284,17 @@ class Beam(Scan):
                     self.display.axes[0].set_xlabel(f'{self.inputChannels[0].name} ({self.inputChannels[0].unit})')
                     self.display.axes[0].set_ylabel(f'{self.inputChannels[1].name} ({self.inputChannels[1].unit})')
                     if done and self.display.interpolateAction.state:
-                        rbf = interpolate.Rbf(x.ravel(), y.ravel(), outputRecordingData.ravel())
+                        rbf = interpolate.Rbf(x.ravel(), y.ravel(), z)
                         xi, yi = self.getMeshgrid(2)  # interpolation coordinates, scaling of 1 much faster than 2 and seems to be sufficient
                         zi = rbf(xi, yi)
-                        self.display.cont = self.display.axes[0].contourf(xi, yi, zi, levels=100, cmap='afmhot')  # contour with interpolation
+                        self.display.cont = self.display.axes[0].contourf(xi, yi, zi, levels=100, cmap=cmap)  # contour with interpolation
                     else:
                         # contour without interpolation
-                        self.display.cont = self.display.axes[0].pcolormesh(x, y, outputRecordingData, cmap='afmhot')
+                        self.display.cont = self.display.axes[0].pcolormesh(x, y, outputRecordingData, cmap=cmap)
                     # ax=self.display.axes[0] instead of cax -> colorbar using all available height and does not scale to plot
                     self.display.cbar = self.display.fig.colorbar(self.display.cont, cax=self.display.cax)  # match axis and color bar size  # , format='%d'
                     self.display.cbar.ax.set_title(self.outputChannels[0].unit)
                     self.display.axes[-1].cursor = ControlCursor(self.display.axes[-1], colors.highlight)  # has to be initialized last, otherwise axis limits may be affected
-
             if len(self.outputChannels) > 0 and self.inputChannels[0].sourceChannel and self.inputChannels[1].sourceChannel:
                 self.display.axes[-1].cursor.setPosition(self.inputChannels[0].value, self.inputChannels[1].value)
             self.updateToolBar(update=update)
@@ -317,16 +330,17 @@ def getMeshgrid(scaling=1):
 
 x, y = getMeshgrid()
 z = outputChannels[output_index].recordingData.ravel()
+cmap = 'afmhot' if np.average(z) > 0 else 'afmhot_r'
 ax.set_xlabel(f'{{inputChannels[0].name}} ({{inputChannels[0].unit}})')
 ax.set_ylabel(f'{{inputChannels[1].name}} ({{inputChannels[1].unit}})')
 
 if _interpolate:
-    rbf = interpolate.Rbf(x.ravel(), y.ravel(), outputChannels[output_index].recordingData.ravel())
+    rbf = interpolate.Rbf(x.ravel(), y.ravel(), z)
     xi, yi = getMeshgrid(2)  # adjust here to get more smoothing: interpolation coordinates, scaling of 1 much faster than 2 and seems to be sufficient
     zi = rbf(xi, yi)
-    cont = ax.contourf(xi, yi, zi, levels=100, cmap='afmhot')  # contour with interpolation
+    cont = ax.contourf(xi, yi, zi, levels=100, cmap=cmap)  # contour with interpolation
 else:
-    cont = ax.pcolormesh(x, y, outputChannels[output_index].recordingData, cmap='afmhot')  # contour without interpolation
+    cont = ax.pcolormesh(x, y, outputChannels[output_index].recordingData, cmap=cmap)  # contour without interpolation
 cbar = fig.colorbar(cont, cax=cax)  # match axis and color bar size  # , format='%d'
 cbar.ax.set_title(outputChannels[0].unit)
 

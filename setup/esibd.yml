@@ -30,6 +30,7 @@ dependencies:
     - openpyxl
     - pfeiffer-vacuum-protocol
     - picosdk
+    - pyautogui
     - PyOpenGL
     - pyqt6==6.6
     - pyqt6-qt6==6.6

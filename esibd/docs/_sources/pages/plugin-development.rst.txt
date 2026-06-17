@@ -30,6 +30,8 @@ Many other helpful classes and methods can be imported from :mod:`esibd.core`.
 If you need to extend the internal plugins just give them another name and make sure to unselect the original one in the plugin manager dialog.
 Core plugins, like :ref:`sec:explorer`, :ref:`sec:settings`, :ref:`sec:console`, :ref:`sec:browser`, etc., can also be extended using *extended.py* and *provide_plugins.py*.
 
+Custom plugins can be shared with other users in a `separate repository <https://github.com/ioneater/ESIBD-Explorer-plugins>`_.
+
 If you want to do something completely different to the already
 implemented functionality, get in touch and see if we can implement a
 base class that can be reused for similar projects in the future and keeps your custom plugin code minimal.

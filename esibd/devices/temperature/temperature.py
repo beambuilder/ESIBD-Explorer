@@ -21,7 +21,7 @@ class Temperature(Device):
 
     name = 'Temperature'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = 'K'
     useMonitors = True
@@ -46,6 +46,7 @@ class Temperature(Device):
 
     def changeUnit(self) -> None:
         """Update plots to account for change of unit."""
+        self.pluginManager.connectAllSources()
         if self.liveDisplayActive():
             self.clearPlot()
             self.liveDisplay.plot()
@@ -68,7 +69,7 @@ class Temperature(Device):
     def convertDataDisplay(self, data: np.ndarray) -> np.ndarray:
         return data - 273.15 if self.unitAction.state else data
 
-    def getUnit(self) -> str:
+    def getDisplayUnit(self) -> str:
         return '°C' if self.unitAction.state else self.unit
 
     def updateTheme(self) -> None:
@@ -106,10 +107,13 @@ class TemperatureChannel(Channel):
     def getDefaultChannel(self) -> dict[str, dict]:
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Temp (K) DISABLED'
+        channel[self.VALUE][Parameter.UNIT] = 'K'
         channel[self.VALUE][Parameter.INDICATOR] = True
         channel[self.VALUE][Parameter.ADVANCED] = True
+        channel[self.MONITOR][Parameter.HEADER] = 'Monitor (K)'
+        channel[self.MONITOR][Parameter.UNIT] = 'K'
         channel[self.POWER] = parameterDict(value=120, parameterType=PARAMETERTYPE.INT, minimum=80, maximum=180, attr='power', instantUpdate=False,
-                                event=self.setPower)
+                                event=self.setPower, unit='W', header='Power (W)')
         return channel
 
     def setDisplayedParameters(self) -> None:
@@ -218,6 +222,7 @@ class TemperatureController(DeviceController):
 
     def closeCommunication(self) -> None:
         self.print('closeCommunication', flag=PRINT.DEBUG)
+        self.closing = True
         if self.acquiring:
             self.stopAcquisition()
         if self.port:
@@ -225,6 +230,7 @@ class TemperatureController(DeviceController):
                 self.port.close()
                 self.port = None
         self.initialized = False
+        self.closing = False
 
     def CryoTelWriteRead(self, message: str) -> str:
         """CryoTel specific serial write and read.

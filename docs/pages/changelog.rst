@@ -3,8 +3,78 @@
 Changelog
 ---------
 
-.. Latest
-.. ======
+Version 1.0.1 2026-04-20
+========================
+
+Added
+~~~~~
+- There is now a search field in |settings| :ref:`sec:settings`.
+- Added a new minimal |webcam| :ref:`sec:webcam` plugin.
+- Plugins in the |pluginDialog| plugin dialog are now sorted by name and enabled state and user can change sorting.
+- Added wake mode in |advanced| advanced mode of |settings| :ref:`sec:settings` to prevent screen lock and sleep. In some situations screen lock can not be disabled. In some situations screen lock and sleep could limit file access and cause program instability.
+- |omnicontrol| :ref:`sec:omnicontrol` plugin overhaul: Can now also control Pfeiffer turbo pumps.
+- In Test Mode there are now warning labels to make sure users are aware of simulated data.
+- The plugin source code file path is now shown in the plugin about dialog.
+- Introduced option to record additional parameters just like values or backgrounds.
+  Set recorded=True in for parameters that should be recorded. If applicable, also set the parameter unit and logY mode here.
+  The recorded values for these parameters will be saved and restored.
+  In the |ucm| :ref:`sec:ucm`, these and any other parameters can be linked directly by using ChannelName.ParameterName.
+  Note that linking parameters can used in the same way for Scans.
+  In the device specific live displays they can be shown using the context menu of the display parameter of the corresponding channel.
+  The parameter will inherit most plot settings from the associated channel but the color will be altered slightly.
+  See |omnicontrol| :ref:`sec:omnicontrol`, |rspd3303c| :ref:`sec:rspd3303c`, and |keithley| :ref:`sec:keithley` for example use cases.
+- Added new device plugin |spa| :ref:`sec:spa` for electron plus picoammeters.
+- ChannelName.ParameterName can now also be used in equations.
+- Added Min Max limits for the Setpoint in |pid| :ref:`sec:pid`.
+
+Changed
+~~~~~~~
+- Defined scaling of channels more gradually.
+- Preview of hdf5 files in the |tree| :ref:`sec:tree` plugin now also previews the content of datasets as a tooltip.
+- In |beam| :ref:`sec:beam` scan the color scale will be inverted for negative scans.
+- |depo| :ref:`sec:depo` is now able to display all current and charge traces.
+- |pico| :ref:`sec:pico` now hides data channel, data type and number of wires for virtual channels.
+- |rbd| :ref:`sec:rbd` now uses np.nan instead of 0 if there was an error parsing the current.
+- Made dashes shorter so they are easier to find in pyqtgraph legend.
+- Allowed use of % as unit.
+- Sending Settings, Channels, and Parameters to the console is now always enabled and not just in Debug Mode.
+- Prevented dragging cursors in scans while scan is running.
+- |rspd3303c| :ref:`sec:rspd3303c`: Improved shutdown timer messages.
+- Made "Error reset time", " Max lag tolerance", and "Lag wait time" accessible in the General section of |settings| :ref:`sec:settings` in |advanced| advanced mode. See tooltips for documentation.
+- Made "max error count" accessible in the Device settings in |advanced| advanced mode. See tooltip for documentation.
+- Plugins are now linked to their documentation in the changelog. Using plugin icons in documentation.
+- Using channel specific icons for linked channels.
+- Channel names can no longer use the . character as . has a special meaning in the context of ChannelName.ParameterName, but it can still be allowed for individual devices if necessary.
+- Allowed all channels to reference all other channels in equations. Previously Input devices could only reference channels from other input devices.
+  Make sure all channels have unique names!
+- For devices that use getDisplayUnit and convertDataDisplay to change the display unit, these definitions will also be used in the liveDisplay of |ucm| :ref:`sec:ucm`.
+  Note that in the list of channels the original unit will always be used consistently.
+
+Fixed
+~~~~~
+- Made sure that liveDisplays are updated after dragging even if devices are not recording.
+- Ensured devices like |keithley| :ref:`sec:keithley` where each channel has a controller turn on properly if started from on button without initializing communication first.
+- Added validation for closing |ls335| :ref:`sec:ls335`.
+- Hidden internal text visible when selecting plugins in |pluginDialog| plugin dialog.
+- Fixed displayed number of maximal errors for devices in the settings tooltip.
+- Resetting error count of virtual channels when reinitializing communication.
+- Fixed estimation of required storage to keep device restore files within the specified maximum storage.
+- Fixed crash due to inconsistent channel values and channel background. Instead showing warning and restoring consistency.
+- Fixed issue on |omnicontrol| :ref:`sec:omnicontrol` with loading values with mixed channel data type. Make sure that the default channel data type is suitable for exporting and restoring data of all other types. E.g. if you mix float (pump speed) and exp (pressure), use exp as the default data type.
+- Fixed loss of history after loading configuration by storing before and loading after loadConfiguration.
+- Fixed an issue where scans were left in the loading state when failing to load data from a file.
+- Preventing empty channel names and names with spaces at the start or end.
+
+Developer Notes
+~~~~~~~~~~~~~~~
+- Added closing flag for DeviceController to prevent recursion if lock can not be acquired while closing communication.
+- |omnicontrol| :ref:`sec:omnicontrol`: Removed dependence on pfeiffer-vacuum-protocol package.
+- Added testing loading entire configuration to the DeviceManager tests.
+- Added IntelliSense support for dynamically imported dependencies (e.g. for |ga| :ref:`sec:genetic_algorithm`).
+- Introduced ChannelManager.defaultChannel which is initialized in the main_thread and can be used as a reference e.g. for saving data from a parallel thread.
+- DeviceManager is no longer waiting for scans that did not initialize successfully in automated testing.
+- Added extraContextActions for parameters and used it to add acknowledge error, set standby speed, and change address options to corresponding parameters in |omnicontrol| :ref:`sec:omnicontrol`.
+- Renamed getUnit to getDisplayUnit to emphasize where it should be used.
 
 Version 0.8.2 2025-06-23
 ========================
@@ -12,40 +82,41 @@ Version 0.8.2 2025-06-23
 Added
 ~~~~~
 - Added highlighting to easier see which devices are turned on.
-- Lakeshore |lakeshore335| is only showing PID controls for active channels. If the channel is only used for reading a temperature PID controls can be ignored.
-
+- |ls335| :ref:`sec:ls335` is only showing PID controls for active channels. If the channel is only used for reading a temperature PID controls can be ignored.
+- CustomPlugin now demonstrates how to interact with and even extend other plugins including internal plugins.
 
 Fixed
 ~~~~~
-- PID |pid| reacts instantly when setpoint changed.
+- |pid| :ref:`sec:pid` reacts instantly when setpoint changed.
 - Fixed some settings that were not set correctly on new PCs.
-- Fixed setting of range and average for RBD |rbd|.
+- Fixed setting of range and average for |rbd| :ref:`sec:rbd`.
 - Fixed file used when exporting scan plots.
+- Preserving new lines from documentation on the about dialog.
 
 Removed
 ~~~~~~~
-- The Pressure plugin has been removed. Use TIC |tic| and MAXIGAUGE |maxigauge| instead.
+- The Pressure plugin has been removed. Use |tic| :ref:`sec:tic` and |maxigauge| :ref:`sec:maxigauge` instead.
 
 Version 0.8.1 2025-06-22
 ========================
 
 Added
 ~~~~~
-- The Tree |tree| plugin can now filter content based on a search field.
-- In Debug mode, items from the Tree |tree| can be added to the Console |console|.
-- Added option to liveDisplays to toggle between automatically |scaleX_auto| or manually |scaleX_manual| scaling the x axis.
+- The |tree| :ref:`sec:tree` plugin can now filter content based on a search field.
+- In Debug mode, items from the |tree| :ref:`sec:tree` can be added to the |console| :ref:`sec:console`.
+- Added option to liveDisplays to toggle between |scaleX_auto| automatically or |scaleX_manual| manually scaling the x axis.
 - Integrated generating and running python plot code for tests of devices, scans, and displays.
 - Added log level setting to determine level of information in logs.
 - Introduced log level 'Trace' which shows detailed device communication info if implemented by device.
 - Tests now write a log to a dedicated file in the current session path.
-- In advanced |advanced| mode of Settings |settings|, the error count for controllers of devices and channels is now shown.
+- In |advanced| advanced mode of |settings| :ref:`sec:settings`, the error count for controllers of devices and channels is now shown.
 - Input channels are now shown in the channel list of scans.
 - Added icons to change log and documentation.
-- Input and output messages from console |console| will now appear in terminal and log file.
-- Added Lakeshore335 |lakeshore335| plugin.
+- Input and output messages from |console| :ref:`sec:console` will now appear in terminal and log file.
+- Added |ls335| :ref:`sec:ls335` plugin.
 - Added advanced option invalidWhileWaiting to Scans to allow to ignore values while signal is stabilizing.
-- Added CustomDevice2 |cookie| as an example of how to create a custom plugin that replaces an internal plugin while using the same files.
-- In Debug mode, plugins will be added to console |console| when accessing the about dialog.
+- Added |customDevice2| :ref:`sec:customDevice2` as an example of how to create a custom plugin that replaces an internal plugin while using the same files.
+- In Debug mode, plugins will be added to |console| :ref:`sec:console` when accessing the about dialog.
 
 Changed
 ~~~~~~~
@@ -62,18 +133,18 @@ Changed
 Fixed
 ~~~~~
 - Fixed error when canceling loading a file from DeviceManager.
-- Changing channel limits will now also update referencing channels (e.g. in UCM or PID).
+- Changing channel limits will now also update referencing channels (e.g. in |ucm| :ref:`sec:ucm` or |pid| :ref:`sec:pid`).
 - Fixed liveDisplay copyClipboard function.
 - Scans will now append session notes to scan notes. Used to be notes of current directory in explorer.
 - Fixed update of colors of in linked channels.
 - Fixed issue with scans starting even through output channels were not recording.
 - Fixed an issue with uninitialized scan plots after changing scan channels.
-- Fixed update of channel values in interactive mode of Omni scan.
+- Fixed update of channel values in interactive mode of |omni| :ref:`sec:omni`.
 - Fixed issue where channel equations tried to access backgrounds for channels that do not use backgrounds.
 - Preventing error when changing directories to fast by ignoring double click while loading.
 - Fixed an issue where the data type of channel values would be changed to float64 when extending the dynamic numpy array.
 - Instead of reloading plugins, the application performs a clean restart. This is to avoid memory leaks from incompletely closed plugins.
-- Fixed TIC, ISEG, and Temperature after testing with hardware.
+- Fixed |tic| :ref:`sec:tic`, |iseg| :ref:`sec:iseg`, and |temperature| :ref:`sec:temperature` after testing with hardware.
 - Fixed testing of internal displays.
 - Splash screen is only on top of ESIBD Explorer but not on top of all other applications.
 
@@ -134,10 +205,10 @@ Added
 ~~~~~
 
 - Added icon legend in about dialogs |help|.
-- Added Calculator |calculator| plugin as an example of embedding external GUI applications as plugins.
+- Added |calculator| :ref:`sec:calculator` plugin as an example of embedding external GUI applications as plugins.
 - Running scans will be indicated by icons in the DeviceManager.
 - Added lagging indicator in advanced mode of device settings.
-- Added option to filter warning and error messages in the Console |console|.
+- Added option to filter warning and error messages in the |console| :ref:`sec:console`.
 
 Changed
 ~~~~~~~
@@ -146,8 +217,8 @@ Changed
 - Treating file types not case sensitive.
 - New icons for msScan and MS.
 - Simplified TIC plugin implementation by inheriting from OMNICONTROL.
-- Made layout more stable by preventing floating of Console |console|, Settings |settings|, and Browser |browser|.
-- Some development specific settings are now hidden by default and only visible in the advanced mode |advanced| of the Settings plugin |settings|.
+- Made layout more stable by preventing floating of |console| :ref:`sec:console`, |settings| :ref:`sec:settings`, and |browser| :ref:`sec:browser`.
+- Some development specific settings are now hidden by default and only visible in the advanced mode |advanced| of the |settings| :ref:`sec:settings`.
 - Channel backgrounds are only displayed and used for channels that are enabled, active, and real.
 - Scans will warn and not start if scan limits exceed limits of scan channels.
 
@@ -170,20 +241,20 @@ Added
 ~~~~~
 
 - Added update information on starting screen.
-- Added option to show an overview of all icons (enter Tree.iconOverview() in Console |console|).
+- Added option to show an overview of all icons (enter Tree.iconOverview() in |console| :ref:`sec:console`).
 - Added Error count setting for devices to stop communication after multiple consecutive errors.
-- Added option to record videos |video| of plugins.
+- Added option to record |video| videos of plugins.
 - Added option to highlight mouse clicks.
 - Added offline installation instructions.
 - Added option to run python files from explorer context menu.
 - Added options to load all device values from file context menu instead of one device at a time.
-- Added option |blue-folder-import| to load all device channels and values from advanced mode |advanced| of DeviceManager |DeviceManager| instead of one device at a time.
+- Added option |blue-folder-import| to load all device channels and values from |advanced| advanced mode of |deviceManager| :ref:`sec:deviceManager` instead of one device at a time.
 - Added simple video example to the documentation.
 
 Changed
 ~~~~~~~
 - Using plugin names more consistently in tooltips.
-- Using explicit tooltips for linked channels in UCM, PID, and scans.
+- Using explicit tooltips for linked channels in |ucm| :ref:`sec:ucm`, |pid| :ref:`sec:pid`, and scans.
 - Reintroduced start recording and subtractBackground actions for live displays (linked to corresponding action in parent Plugin).
 
 Fixed
@@ -195,7 +266,7 @@ Fixed
 
 Removed
 ~~~~~~~
-- Removed display time control for device manager (use UCM to see multiple channels with consistent time).
+- Removed display time control for device manager (use |ucm| :ref:`sec:ucm` to see multiple channels with consistent time).
 
 Version 0.7.1 2025-02-08
 ========================
@@ -203,71 +274,79 @@ Version 0.7.1 2025-02-08
 Added
 ~~~~~
 
-- Added new icons for UCM |UCM|, Line |LINE|, and DeviceManager |DeviceManager|.
+- Added new icons for |ucm| :ref:`sec:ucm`, Line |line|, and |deviceManager| :ref:`sec:deviceManager`.
 - Added change log to readthedocs.
 - Added Linux installation instructions.
 - Generalized opening files and storing settings to work on Linux.
 - Limiting valid characters for channel names.
-- Adding messages emitted during initialization to Console |console|.
+- Adding messages emitted during initialization to |console| :ref:`sec:console`.
 - Added itemFile and itemFileDark to simplify specification of icons and show icons in PluginManager.
 - Added program info to plugins.ini
 
 Changed
 ~~~~~~~
 
-- Removed checkbox for non optional plugins in plugin dialog.
+- Removed checkbox for non optional plugins in |pluginDialog| plugin dialog.
 - Prevent DeviceManager from moving or floating.
 - Disable navigation icons in explorer while loading directory to avoid inconsistent behavior.
-- Plugin dialog |pluginDialog| can now be accessed while devices are communicating. Communication will only be stopped when reloading plugins.
+- |pluginDialog| Plugin dialog can now be accessed while devices are communicating. Communication will only be stopped when reloading plugins.
 - Improved formatting of values in .ini files and change logs.
 - Prevent loading of channels while recording.
-- PICO |pico| only loads SDK if user has explicitly enabled this plugin.
+- |pico| :ref:`sec:pico` only loads SDK if user has explicitly enabled this plugin.
 - Using dark mode background instead of black for scans.
 - Devices only store data regularly if they are actively recording new data.
 - Waiting for scans to finish when closing.
-- UCM |UCM|, PID |PID|, and Scan channels show background corrected values if applicable.
-- Depo scan |depo| is using color of selected current channel.
+- |ucm| :ref:`sec:ucm`, |pid| :ref:`sec:pid`, and Scan channels show background corrected values if applicable.
+- |depo| :ref:`sec:depo` is using color of selected current channel.
 
 Fixed
 ~~~~~
 
 - Reconnecting source channels after loading device configuration.
 - Fixed error caused by missing console history file.
-- Fixed copyClipboard |clipboardImage| in light theme
+- Fixed |clipboardImage| copyClipboard in light theme
 - Fixed repeated plotting when loading scans.
-- Fixed scan channel initialization for Depo Scan.
-- Using display parameter for Omni scan |omni|.
+- Fixed scan channel initialization for |depo| :ref:`sec:depo`.
+- Using display parameter for |omni| :ref:`sec:omni`.
 - Removed display parameter for other scans.
-- Implemented proper file handling for UCM |UCM| and PID |PID|.
+- Implemented proper file handling for |ucm| :ref:`sec:ucm` and |pid| :ref:`sec:pid`.
 - Fixed incomplete status messages
 - RSPD3303C only sets values for enabled channels.
 
 Version 0.7.0 2025-01-19
 ========================
 
-This version brings multiple improvements to the user interface and messages. The main new features include the Universal Channel Manager (UCM |UCM|), PID Plugin |PID|, and a channel interface for scans. The data and config file formats remain unchanged. The plugin file format is significantly simplified but requires adjustments (see below) to use old plugins with the current version!
+This version brings multiple improvements to the user interface and messages.
+The main new features include the Universal Channel Manager (|ucm| :ref:`sec:ucm`), |pid| :ref:`sec:pid` Plugin, and a channel interface for scans.
+The data and config file formats remain unchanged. The plugin file format is significantly simplified but requires adjustments (see below) to use old plugins with the current version!
 
 Added
 ~~~~~
 
-- Universal Channel Manager (UCM |UCM|) plugin: This plugin allows to reference arbitrary channels from other devices to create a central list of the most important information. All referenced channels can be controlled from here. The corresponding display allows to see recorded data from multiple devices in one central location. For most users this should result in improved performance and less complexity as the individual device tabs and corresponding displays will rarely be needed once the channels in the UCM are configured.
-- PID Plugin |PID|: Allows to establish a PID control loop between two arbitrary channels.
-- Added option to collapse |collapse| channels of same color to focus on the most relevant channels.
+- Universal Channel Manager (|ucm| :ref:`sec:ucm`) plugin: This plugin allows to reference arbitrary channels from other devices to create a central list of the most important information.
+  All referenced channels can be controlled from here. The corresponding display allows to see recorded data from multiple devices in one central location.
+  For most users this should result in improved performance and less complexity as the individual device tabs and corresponding displays will rarely be needed once the channels in the |ucm| :ref:`sec:ucm` are configured.
+- |pid| :ref:`sec:pid`: Allows to establish a PID control loop between two arbitrary channels.
+- Added option to |collapse| collapse channels of same color to focus on the most relevant channels.
 - Channels now allow to change Line Style and Group for plotting.
 - Channels now allow to change Scaling to highlight important channels (and to see them from the other side of the lab!).
 - Added channel interface for scans.
-- Depo scan can now record data from arbitrary additional channels.
+- |depo| :ref:`sec:depo` can now record data from arbitrary additional channels.
 - Added option to inspect the object currently in the Console input.
 - Option to use icons instead of labels in tab bars (active by default).
 - Live Displays allow to sort plot curves by device, unit, or group (new channel parameter), and arrange them horizontally, vertically, or stacked.
-- Added plugins for KEITHLEY 6487, GAA MIPS, NI9263, Pfeiffer Omnicontrol, RSPD3303C, and pico PT-104.
-- Added option to generate plot files for displays including MS, Line, PDB, Holo.
+- Added plugins: |keithley| :ref:`sec:keithley`, |mips| :ref:`sec:mips`, |ni9263| :ref:`sec:ni9263`, |omnicontrol| :ref:`sec:omnicontrol`, |rspd3303c| :ref:`sec:rspd3303c`, and |pico| :ref:`sec:pico`.
+- Added option to generate plot files for displays including |ms| :ref:`sec:ms`, |line| :ref:`sec:line`, |pdb| :ref:`sec:pdb`, |holo| :ref:`sec:holo`.
 - Plugin Manager now shows the supported version of plugins and highlights if they are compatible with the current program or not.
 
 Changed
 ~~~~~~~
 
-- Plugin format: Much of the functionally has been moved to the base class allowing developers to use standard functionality by using a flag (useMonitors, useDisplays, useBackgrounds, useOnOffLogic) instead of implementing it in the specific plugin file. Some functions have been renamed to be more descriptive and consistent. Most important examples are: stop -> closeCommunication, init -> initializeCommunication, apply -> applyValues. Make sure to compare to build in examples and test your plugins when updating your custom plugins for the current version. Documentation in CustomDevice has been improved to demonstrate and explain the current plugin format.
+- Plugin format: Much of the functionally has been moved to the base class allowing developers to use standard functionality by using a flag (useMonitors, useDisplays, useBackgrounds, useOnOffLogic)
+  instead of implementing it in the specific plugin file. Some functions have been renamed to be more descriptive and consistent.
+  Most important examples are: stop -> closeCommunication, init -> initializeCommunication, apply -> applyValues.
+  Make sure to compare to build in examples and test your plugins when updating your custom plugins for the current version.
+  Documentation in |customDevice| :ref:`sec:customDevice` has been improved to demonstrate and explain the current plugin format.
 - Logging is now enabled by default. More informative status, warning, and error messages. A lot more messages in debug mode.
 - Using icons for messages, warnings, and errors in status bar, log file, and Console
 - Old logs are regularly removed from the log file
@@ -278,7 +357,7 @@ Changed
 Deprecated
 ~~~~~~~~~~
 
-- Splitting Pressure plugin into dedicated TIC and MAXIGAUGE plugins. If necessary channels can be combined using UCM. Pressure plugin is now deprecated and will be removed in the future.
+- Splitting Pressure plugin into dedicated TIC and MAXIGAUGE plugins. If necessary channels can be combined using |ucm| :ref:`sec:ucm`. Pressure plugin is now deprecated and will be removed in the future.
 
 Fixed
 ~~~~~
@@ -301,8 +380,8 @@ Added
 - Tree.inspect now shows values if applicable
 - Console restores history of used commands after restart
 - Introduced setDisplayDecimals to customize display of floats including scientific notation
-- Added variable aspect ratio option for beam scan (varAxesAspect in autogenerated plot file)
-- Added new scan mode "Spectra" for a series of 1D spectra based on Beam scan
+- Added variable aspect ratio option for |beam| :ref:`sec:beam` (varAxesAspect in autogenerated plot file)
+- Added new scan mode |spectra| :ref:`sec:spectra` for a series of 1D spectra based on |beam| :ref:`sec:beam`
 - Added new UI tool MultiStateAction
 - Added dedicated channelPlot to display channel data instead of using Line plugin
 - Added msSpectra mode for simple mass spectra
@@ -430,11 +509,12 @@ Added
 - Added "Depo" tab to display and document deposition.
 - Added "Move to Recycle Bin" feature to explorer items.
 - The device configuration can be exported directly to the current session.
-- The most common current plot functions are now directly attached to the current plot and always accessible. In addition, the voltage button moved here to indicate the voltage status at all times and allow quick access in case of an emergency.
-- The position on the 2D scan is indicated by a cursor.
+- The most common current plot functions are now directly attached to the current plot and always accessible.
+  In addition, the voltage button moved here to indicate the voltage status at all times and allow quick access in case of an emergency.
+- The position on the |beam| :ref:`sec:beam` is indicated by a cursor.
 - The manual can be accessed from the Help menu.
 - The optimization progress is shown in a dedicated tab while running.
-- Color bar for 2D scans is labeled.
+- Color bar for |beam| :ref:`sec:beam` is labeled.
 - Added custom device tab example. See new section in documentation for details.
 - The Testmode can now be activated directly from the settings menu and stays active if the application is restarted
 - All device settings are saved together with the measurement data in a single .h5 file. Values can be loaded by right clicking the file or importing from the corresponding device tab.
@@ -443,7 +523,7 @@ Changed
 ~~~~~~~
 
 - Result of mass analysis is shown in plot.
-- The initial signal is used instead of 0 to initialize 2D scans, making to displayed color range more useful.
+- The initial signal is used instead of 0 to initialize |beam| :ref:`sec:beam`, making to displayed color range more useful.
 - Background subtraction is active by default, though there is no effect until backgrounds are defined.
 - More content is dockable.
 - Devices will now generate default .ini files if no file is found. This can be useful to make sure the files are valid before populating them with additional channels.

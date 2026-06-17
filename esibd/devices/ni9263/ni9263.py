@@ -15,7 +15,7 @@ class NI9263(Device):
 
     name = 'NI9263'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = 'V'
     iconFile = 'NI9263.png'
@@ -40,6 +40,7 @@ class VoltageChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Voltage (V)'  # overwrite to change header
+        channel[self.VALUE][Parameter.UNIT] = 'V'
         channel[self.MIN][Parameter.VALUE] = 0
         channel[self.MAX][Parameter.VALUE] = 1  # start with safe limits
         channel[self.ADDRESS] = parameterDict(value='cDAQ1Mod1/ao0', toolTip='Address of analog output',
@@ -95,3 +96,4 @@ class VoltageController(DeviceController):
         super().closeCommunication()
         # nothing to close
         self.initialized = False
+        self.closing = False

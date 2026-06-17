@@ -217,7 +217,7 @@ fig.show()
                         outputChannel.signalComm.waitUntilStableSignal.emit(self.wait)
                 time.sleep((self.wait + self.average) / 1000)  # if step is larger than threshold use longer wait time
                 self.bufferLagging()
-                self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.')
+                self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.', timeout=10)
                 inputChannelValues0 = self.inputChannels[0].getValues(subtractBackground=self.inputChannels[0].subtractBackgroundActive(), length=self.measurementsPerStep)
                 if inputChannelValues0 is not None:
                     if self.inputChannels[0].recording:  # get average
@@ -246,7 +246,7 @@ fig.show()
                         self.inputChannels[0].updateValueSignal.emit(step)
                     time.sleep(((self.waitLong if waitLong else self.wait) + self.average) / 1000)  # if step is larger than threshold use longer wait time
                     self.bufferLagging()
-                    self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.')
+                    self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.', timeout=10)
                     for outputChannel in self.outputChannels:
                         outputRecordingData = outputChannel.getValues(subtractBackground=outputChannel.getDevice().subtractBackgroundActive(),
                                                                                           length=self.measurementsPerStep)

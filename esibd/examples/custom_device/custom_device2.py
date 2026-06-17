@@ -35,6 +35,9 @@ class CustomDevice2(CustomDevice):
         self.confINI = f'{CustomDevice.name}.ini'  # not a file extension, but complete filename to save and restore configurations
         self.confh5 = f'_{CustomDevice.name.lower()}.h5'
         self.previewFileTypes = [self.confINI, self.confh5]
+        parentDocumentation = super().documentation or super().__doc__
+        if self.__doc__ and parentDocumentation:
+            self.documentation = self.__doc__ + '\nDocumentation of the parent plugin below:\n' + parentDocumentation
 
     def initGUI(self) -> None:
         """Initialize your custom user interface."""

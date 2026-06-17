@@ -26,7 +26,7 @@ class MassSpec(Scan):
 
     name = 'msScan'
     version = '1.1'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     iconFile = 'msScan.png'
     useInvalidWhileWaiting = True
 

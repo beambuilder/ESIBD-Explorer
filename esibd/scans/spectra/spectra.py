@@ -201,7 +201,7 @@ class Spectra(Beam):
                     outputChannel.signalComm.waitUntilStableSignal.emit(self.waitLong if waitLong else self.wait)
             time.sleep(((self.waitLong if waitLong else self.wait) + self.average) / 1000)  # if step is larger than threshold use longer wait time
             self.bufferLagging()
-            self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.')
+            self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.', timeout=10)
             for outputChannel in self.outputChannels:
                 # 2D scan
                 # definition updated to scan along x instead of y axis.

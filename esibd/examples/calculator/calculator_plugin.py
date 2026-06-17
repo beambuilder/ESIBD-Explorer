@@ -13,7 +13,7 @@ class Calculator(Plugin):
 
     name = 'Calculator'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.CONTROL
     iconFile = 'calculator.png'
 

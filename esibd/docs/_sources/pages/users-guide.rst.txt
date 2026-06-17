@@ -1,5 +1,7 @@
 .. include:: icons.rst
 
+.. _`sec:UsersGuide`:
+
 User's Guide
 ============
 
@@ -23,7 +25,7 @@ During and after the measurement, results are displayed using various
 :ref:`sec:displays` on the right. The most important signals of
 any deposition experiment, including the real-time ion-currents, are always
 visible in a dedicated :ref:`sec:live_displays` on the top.
-The :ref:`sec:device_manager` |DeviceManager| is a central interface that allows to control all devices simultaneously.
+The :ref:`sec:deviceManager` |deviceManager| is a central interface that allows to control all devices simultaneously.
 Finally, there is a :ref:`sec:console` |console| for status messages
 and advanced features that can be opened from :ref:`sec:settings` |settings|.
 Users are free to rearrange the user interface by dragging and tearing components.
@@ -51,8 +53,8 @@ question mark |help| in their toolbar.
 
 .. _`sec:settings`:
 
-Settings
---------
+|settings| Settings
+-------------------
 .. automodule:: esibd.plugins.Settings
    :noindex:
 
@@ -114,18 +116,22 @@ use the same built-in functions to manage settings internally (e.g., see :ref:`s
 
 .. _`sec:explorer`:
 
-Explorer
---------
+|explorer| Explorer
+-------------------
 .. automodule:: esibd.plugins.Explorer
    :noindex:
 
-UCM
----
+.. _`sec:ucm`:
+
+|ucm| UCM
+---------
 .. automodule:: esibd.plugins.UCM
    :noindex:
 
-PID
----
+.. _`sec:PID`:
+
+|pid| PID
+---------
 .. automodule:: esibd.plugins.PID
    :noindex:
 
@@ -166,61 +172,123 @@ Other
    Additional device specific settings, e.g. COM ports or IP addresses
    for communication.
 
-Custom device
-~~~~~~~~~~~~~
+.. _`sec:calculator`:
+
+|calculator| Calculator
+~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: esibd.examples.calculator.calculator_plugin.Calculator
+   :noindex:
+
+.. _`sec:customDevice`:
+
+|customDevice| Custom device
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: esibd.examples.custom_device.custom_device.CustomDevice
+   :noindex:
+
+.. _`sec:customDevice2`:
+
+|customDevice2| Custom device 2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: esibd.examples.custom_device.custom_device2.CustomDevice2
    :noindex:
 
 .. _`sec:ISEG`:
 
-ISEG
-~~~~
+|iseg| ISEG
+~~~~~~~~~~~
 .. automodule:: esibd.devices.iseg.iseg.ISEG
    :noindex:
 
-RBD
-~~~
-.. automodule:: esibd.devices.rbd.rbd.RBD
-   :noindex:
+.. _`sec:KEITHLEY`:
 
-TIC
-~~~
-.. automodule:: esibd.devices.tic.tic.TIC
-   :noindex:
-
-MAXIGAUGE
-~~~~~~~~~
-.. automodule:: esibd.devices.maxigauge.maxigauge.MAXIGAUGE
-   :noindex:
-
-Temperature
-~~~~~~~~~~~
-.. automodule:: esibd.devices.temperature.temperature.Temperature
-   :noindex:
-
-KEITHLEY
-~~~~~~~~
+|keithley| KEITHLEY
+~~~~~~~~~~~~~~~~~~~
 .. automodule:: esibd.devices.keithley.keithley.KEITHLEY
    :noindex:
 
-MIPS
-~~~~
+.. _`sec:LS335`:
+
+|ls335| LS335
+~~~~~~~~~~~~~
+.. automodule:: esibd.devices.lakeshore335.lakeshore.LS335
+   :noindex:
+
+.. _`sec:MAXIGAUGE`:
+
+|maxigauge| MAXIGAUGE
+~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: esibd.devices.maxigauge.maxigauge.MAXIGAUGE
+   :noindex:
+
+.. _`sec:MIPS`:
+
+|mips| MIPS
+~~~~~~~~~~~
 .. automodule:: esibd.devices.mips.mips.MIPS
    :noindex:
 
-NI9263
-~~~~~~
+.. _`sec:ni9263`:
+
+|ni9263| NI9263
+~~~~~~~~~~~~~~~
 .. automodule:: esibd.devices.ni9263.ni9263.NI9263
    :noindex:
 
-PICO
-~~~~
+.. _`sec:OMNICONTROL`:
+
+|omnicontrol| OMNICONTROL
+~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: esibd.devices.omnicontrol.omnicontrol.OMNICONTROL
+   :noindex:
+
+.. _`sec:PICO`:
+
+|pico| PICO
+~~~~~~~~~~~
 .. automodule:: esibd.devices.pico.pico.PICO
    :noindex:
 
-RSPD3303C
+.. _`sec:RBD`:
+
+|rbd| RBD
 ~~~~~~~~~
+.. automodule:: esibd.devices.rbd.rbd.RBD
+   :noindex:
+
+.. _`sec:RSPD3303C`:
+
+|rspd3303c| RSPD3303C
+~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: esibd.devices.rspd3303c.rspd3303c.RSPD3303C
+   :noindex:
+
+.. _`sec:SPA`:
+
+|spa| SPA
+~~~~~~~~~
+.. automodule:: esibd.devices.spa.spa.SPA1x0
+   :noindex:
+
+.. _`sec:Temperature`:
+
+|temperature| Temperature
+~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: esibd.devices.temperature.temperature.Temperature
+   :noindex:
+
+.. _`sec:TIC`:
+
+|tic| TIC
+~~~~~~~~~
+.. automodule:: esibd.devices.tic.tic.TIC
+   :noindex:
+
+.. _`sec:webcam`:
+
+|webcam| Webcam
+~~~~~~~~~~~~~~~
+.. automodule:: esibd.controls.webcam.webcam.Webcam
    :noindex:
 
 .. _`sec:channels`:
@@ -393,18 +461,22 @@ Other
 
 .. _`sec:genetic_algorithm`:
 
-Genetic algorithm (GA)
-~~~~~~~~~~~~~~~~~~~~~~
-.. automodule:: esibd.scans.ga.ga.GA
+|ga| Genetic algorithm (GA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: esibd.scans.ga.ga.GAScan
    :noindex:
 
-Omni scan
-~~~~~~~~~
+.. _`sec:omni`:
+
+|omni| Omni scan
+~~~~~~~~~~~~~~~~
 .. automodule:: esibd.scans.omni.omni.Omni
    :noindex:
 
-Spectra scan
-~~~~~~~~~~~~
+.. _`sec:spectra`:
+
+|spectra| Spectra scan
+~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: esibd.scans.spectra.spectra.Spectra
    :noindex:
 
@@ -414,18 +486,24 @@ experiments, make sure to get familiar with those scans, otherwise
 consider using them as templates for your own custom scans. See :ref:`sec:plugin_system` for
 more information.
 
-Beam scan
-~~~~~~~~~
+.. _`sec:beam`:
+
+|beam| Beam scan
+~~~~~~~~~~~~~~~~
 .. automodule:: esibd.scans.beam.beam.Beam
    :noindex:
 
-Energy scan
-~~~~~~~~~~~
+.. _`sec:energy`:
+
+|energy| Energy scan
+~~~~~~~~~~~~~~~~~~~~
 .. automodule:: esibd.scans.energy.energy.Energy
    :noindex:
 
-Depo scan
-~~~~~~~~~
+.. _`sec:depo`:
+
+|depo| Depo scan
+~~~~~~~~~~~~~~~~
 .. automodule:: esibd.scans.depo.depo.Depo
    :noindex:
 
@@ -458,54 +536,64 @@ of similar plugins for other purposes. See :ref:`sec:plugin_system` for more inf
 
 .. _`sec:browser`:
 
-Browser
-~~~~~~~
+|browser| Browser
+~~~~~~~~~~~~~~~~~
 
 .. automodule:: esibd.plugins.Browser
    :noindex:
 
 .. _`sec:notes`:
 
-Notes
-~~~~~
+|notes| Notes
+~~~~~~~~~~~~~
 
 .. automodule:: esibd.plugins.Notes
    :noindex:
 
 .. _`sec:text`:
 
-Text
-~~~~
+|text| Text
+~~~~~~~~~~~
 
 .. automodule:: esibd.plugins.Text
    :noindex:
 
-Tree
-~~~~
+.. _`sec:tree`:
+
+|tree| Tree
+~~~~~~~~~~~
 
 .. automodule:: esibd.plugins.Tree
    :noindex:
 
-MS
-~~
+.. _`sec:ms`:
+
+|ms| MS
+~~~~~~~
 
 .. automodule:: esibd.displays.ms.ms.MS
    :noindex:
 
-Line
-~~~~
+.. _`sec:line`:
+
+|line| Line
+~~~~~~~~~~~
 
 .. automodule:: esibd.displays.line.line.LINE
    :noindex:
 
-PDB
-~~~
+.. _`sec:pdb`:
+
+|pdb| PDB
+~~~~~~~~~
 
 .. automodule:: esibd.displays.pdb.pdb.PDB
    :noindex:
 
-Holo
-~~~~
+.. _`sec:holo`:
+
+|holo| Holo
+~~~~~~~~~~~
 
 .. automodule:: esibd.displays.holo.holo.HOLO
    :noindex:
@@ -518,18 +606,18 @@ Live displays
 .. automodule:: esibd.plugins.LiveDisplay
    :noindex:
 
-.. _`sec:device_manager`:
+.. _`sec:deviceManager`:
 
-Device manager
---------------
+|deviceManager| Device manager
+------------------------------
 
 .. automodule:: esibd.plugins.DeviceManager
    :noindex:
 
 .. _`sec:console`:
 
-Console
--------
+|console| Console
+-----------------
 
 .. automodule:: esibd.plugins.Console
    :noindex:

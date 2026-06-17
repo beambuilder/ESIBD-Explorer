@@ -23,7 +23,7 @@ class ISEG(Device):
 
     name = 'ISEG'
     version = '1.1'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = 'V'
     useMonitors = True
@@ -79,6 +79,9 @@ class VoltageChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Voltage (V)'  # overwrite to change header
+        channel[self.VALUE][Parameter.UNIT] = 'V'  # overwrite to change header
+        channel[self.MONITOR][Parameter.HEADER] = 'Monitor (V)'
+        channel[self.MONITOR][Parameter.UNIT] = 'V'
         channel[self.MODULE] = parameterDict(value=0, parameterType=PARAMETERTYPE.INT, advanced=True,
                                     header='Mod', minimum=0, maximum=99, attr='module')
         channel[self.ID] = parameterDict(value=0, parameterType=PARAMETERTYPE.INT, advanced=True,
@@ -169,6 +172,7 @@ class VoltageController(DeviceController):
         super().closeCommunication()
         self.socket = None
         self.initialized = False
+        self.closing = False
 
     def ISEGWriteRead(self, message: str, already_acquired: bool = False) -> str:
         """ISEG specific serial write and read.

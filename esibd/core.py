@@ -252,6 +252,7 @@ class PluginManager:  # noqa: PLR0904
     OPTIONAL = 'OPTIONAL'
     PLUGIN_TYPE = 'PLUGINTYPE'
     DEPENDENCYPATH = 'dependencyPath'
+    SOURCECODEPATH = 'sourceCodePath'
     ICONFILE = 'iconFile'
     ICONFILEDARK = 'iconFileDark'
 
@@ -263,6 +264,7 @@ class PluginManager:  # noqa: PLR0904
         self.logger = Logger(pluginManager=self)
         self.logger.print('Loading.', flag=PRINT.EXPLORER)
         self.pluginFile: 'Path | None' = None
+        self.tree: 'TreeWidget | None' = None
         self.mainWindow.setTabPosition(Qt.DockWidgetArea.LeftDockWidgetArea, QTabWidget.TabPosition.North)
         self.mainWindow.setTabPosition(Qt.DockWidgetArea.RightDockWidgetArea, QTabWidget.TabPosition.North)
         self.mainWindow.setTabPosition(Qt.DockWidgetArea.TopDockWidgetArea, QTabWidget.TabPosition.North)
@@ -335,11 +337,13 @@ class PluginManager:  # noqa: PLR0904
         self.confParser[INFO] = infoDict('PluginManager')
 
         import esibd.provide_plugins  # pylint: disable = import-outside-toplevel  # avoid circular import  # noqa: PLC0415
-        self.loadPluginsFromModule(Module=esibd.provide_plugins, dependencyPath=internalMediaPath)
+        self.loadPluginsFromModule(Module=esibd.provide_plugins, dependencyPath=internalMediaPath,
+                                   sourceCodePath=Path(esibd.provide_plugins.__file__.replace('provide_plugins', 'plugins')))
         self.loadPluginsFromPath(esibdPath / 'examples')
         self.loadPluginsFromPath(esibdPath / 'devices')
         self.loadPluginsFromPath(esibdPath / 'scans')
         self.loadPluginsFromPath(esibdPath / 'displays')
+        self.loadPluginsFromPath(esibdPath / 'controls')
         self.loadPluginsFromPath(getValidPluginPath())
 
         obsoletePluginNames = [name for name in self.confParser if name != Parameter.DEFAULT.upper() and name != INFO and name not in self.pluginNames]
@@ -374,7 +378,7 @@ class PluginManager:  # noqa: PLR0904
         QTimer.singleShot(0, self.signalComm.finalizeSignal.emit)  # add delay to make sure application is ready to process updates, but make sure it is done in main thread
         self.app.splashScreen.close()  # close as soon as mainWindow is ready
         if getTestMode():
-            self.logger.print('Test mode is active!', flag=PRINT.WARNING)
+            self.logger.print('Test mode is active! Simulating Data!', flag=PRINT.WARNING)
         self.logger.print('Ready.', flag=PRINT.EXPLORER)
 
     def loadPluginsFromPath(self, path: 'Path | None') -> None:
@@ -384,8 +388,8 @@ class PluginManager:  # noqa: PLR0904
         :type path: pathlib.Path
         """
         if path:  # noqa: PLR1702
-            for _dir in [_dir for _dir in path.iterdir() if _dir.is_dir()]:
-                for file in [file for file in _dir.iterdir() if file.name.endswith('.py')]:
+            for directory in [directory for directory in path.iterdir() if directory.is_dir()]:
+                for file in [file for file in directory.iterdir() if file.name.endswith('.py')]:
                     try:
                         Module = dynamicImport(file.stem, file)
                     except Exception as e:  # pylint: disable = broad-except  # we have no control about the exception a plugin can possibly throw here  # noqa: BLE001
@@ -399,18 +403,20 @@ class PluginManager:  # noqa: PLR0904
                     else:
                         if hasattr(Module, 'providePlugins'):
                             if Module and type(Module.providePlugins()) is list:
-                                self.loadPluginsFromModule(Module=Module, dependencyPath=file.parent)
+                                self.loadPluginsFromModule(Module=Module, dependencyPath=file.parent, sourceCodePath=file)
                             else:
                                 self.logger.print(f'Could not load module {file.stem}. Make sure providePlugins returns list of valid plugins.', flag=PRINT.ERROR)
                         # silently ignore dependencies which do not define providePlugins
 
-    def loadPluginsFromModule(self, Module: 'ModuleType', dependencyPath: Path) -> None:
+    def loadPluginsFromModule(self, Module: 'ModuleType', dependencyPath: Path, sourceCodePath: Path) -> None:
         """Load plugins from a module.
 
         :param Module: A module providing one or multiple plugins.
         :type Module: ModuleType
         :param dependencyPath: The path where dependencies like icons are stored, defaults to None
         :type dependencyPath: pathlib.Path, optional
+        :param sourceCodePath: Path to the plugin source code.
+        :type sourceCodePath: Path
         """
         for Plugin in Module.providePlugins():
             # requires loading all dependencies, no matter if plugin is used or not
@@ -419,24 +425,25 @@ class PluginManager:  # noqa: PLR0904
             self.pluginNames.append(Plugin.name)
             if Plugin.name not in self.confParser:  # add plugin to confParser
                 self.confParser.read_dict({Plugin.name: {self.ENABLED: not Plugin.optional, self.VERSION: Plugin.version, self.SUPPORTEDVERSION: Plugin.supportedVersion,
-                                                self.DEPENDENCYPATH: dependencyPath, self.ICONFILE: Plugin.iconFile, self.ICONFILEDARK: Plugin.iconFileDark,
-                                                self.PLUGIN_TYPE: str(Plugin.pluginType.value), self.PREVIEWFILETYPES: '',
+                                                self.DEPENDENCYPATH: dependencyPath, self.SOURCECODEPATH: sourceCodePath, self.ICONFILE: Plugin.iconFile,
+                                                self.ICONFILEDARK: Plugin.iconFileDark, self.PLUGIN_TYPE: str(Plugin.pluginType.value), self.PREVIEWFILETYPES: '',
                                                 self.DESCRIPTION: Plugin.documentation or Plugin.__doc__, self.OPTIONAL: str(Plugin.optional)}})
             else:  # update
                 self.confParser[Plugin.name][self.VERSION] = Plugin.version
                 self.confParser[Plugin.name][self.SUPPORTEDVERSION] = Plugin.supportedVersion
                 self.confParser[Plugin.name][self.DEPENDENCYPATH] = dependencyPath.as_posix()
+                self.confParser[Plugin.name][self.SOURCECODEPATH] = sourceCodePath.as_posix()
                 self.confParser[Plugin.name][self.ICONFILE] = Plugin.iconFile
                 self.confParser[Plugin.name][self.ICONFILEDARK] = Plugin.iconFileDark
                 self.confParser[Plugin.name][self.PLUGIN_TYPE] = str(Plugin.pluginType.value)
                 self.confParser[Plugin.name][self.DESCRIPTION] = Plugin.documentation or Plugin.__doc__
                 self.confParser[Plugin.name][self.OPTIONAL] = str(Plugin.optional)
             if self.confParser[Plugin.name][self.ENABLED] == 'True':
-                plugin = self.loadPlugin(Plugin, dependencyPath=dependencyPath)
+                plugin = self.loadPlugin(Plugin, dependencyPath=dependencyPath, sourceCodePath=sourceCodePath)
                 if plugin:
                     self.confParser[Plugin.name][self.PREVIEWFILETYPES] = ', '.join(plugin.getSupportedFiles())  # requires instance
 
-    def loadPlugin(self, Plugin: 'type[Plugin]', dependencyPath: Path = internalMediaPath) -> 'Plugin | None':
+    def loadPlugin(self, Plugin: 'type[Plugin]', dependencyPath: Path, sourceCodePath: Path) -> 'Plugin | None':
         """Load a single plugin.
 
         Plugins must have a static name and pluginType.
@@ -447,6 +454,8 @@ class PluginManager:  # noqa: PLR0904
         :type Plugin: Plugin
         :param dependencyPath: The path where dependencies like icons are stored, defaults to None
         :type dependencyPath: pathlib.Path, optional
+        :param sourceCodePath: Path to the plugin source code.
+        :type sourceCodePath: Path
         :return: Instance of the plugin.
         :rtype: class:`~esibd.plugins.Plugin`
         """
@@ -461,7 +470,7 @@ class PluginManager:  # noqa: PLR0904
             self.logger.print(f'Ignoring duplicate plugin {Plugin.name}.', flag=PRINT.WARNING)
         else:
             try:
-                plugin = Plugin(pluginManager=self, dependencyPath=dependencyPath)
+                plugin = Plugin(pluginManager=self, dependencyPath=dependencyPath, sourceCodePath=sourceCodePath)
                 setattr(self.__class__, plugin.name, plugin)  # use attributes to access for communication between plugins
             except Exception:  # pylint: disable = broad-except  # we have no control about the exception a plugin can possibly throw  # noqa: BLE001
                 # No unpredictable exception in a single plugin should break the whole application
@@ -579,7 +588,8 @@ class PluginManager:  # noqa: PLR0904
             if plugin.waitForCondition(condition=lambda plugin=plugin: hasattr(plugin, 'videoRecorderAction'), timeoutMessage=f'dock of {plugin.name}'):
                 plugin.raiseDock(showPlugin=True)
                 plugin.runTestParallel()
-                if not plugin.waitForCondition(condition=lambda plugin=plugin: not plugin.testing_state, timeout=60, timeoutMessage=f'testing {plugin.name} to complete.'):
+                if not plugin.waitForCondition(condition=lambda plugin=plugin: not plugin.testing_state, timeout=plugin.testTimeout,
+                                               timeoutMessage=f'testing {plugin.name} to complete.'):
                     plugin.signalComm.testCompleteSignal.emit()
             if not self.testing:
                 break
@@ -602,23 +612,27 @@ class PluginManager:  # noqa: PLR0904
         dlg.setWindowIcon(Icon(internalMediaPath / 'block--pencil.png'))
         lay = QGridLayout()
         lay.setContentsMargins(0, 0, 0, 0)
-        tree = TreeWidget()
-        tree.setHeaderLabels(['', 'Name', 'Enabled', 'Version', 'Supported Version', 'Type', 'Preview File Types', 'Description (See tooltips!)'])
-        tree.setColumnCount(8)
-        tree.setRootIsDecorated(False)
-        tree.setColumnWidth(2, 50)
-        tree.setColumnWidth(3, 50)
-        tree.setColumnWidth(4, 50)
-        header = tree.header()
+        self.tree = TreeWidget()
+        self.tree.setItemDelegate(TransparentTextDelegate(self.tree))
+        self.tree.setHeaderLabels(['', 'Name', 'Enabled', 'Version', 'Supported Version', 'Type', 'Preview File Types', 'Description (See tooltips!)'])
+        self.tree.setColumnCount(8)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setColumnWidth(2, 50)
+        self.tree.setColumnWidth(3, 50)
+        self.tree.setColumnWidth(4, 50)
+        self.tree.setSortingEnabled(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.toggleSelectionContextMenu)
+        header = self.tree.header()
         if header:
             header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        tree.setColumnWidth(6, 150)
-        root = tree.invisibleRootItem()
+        self.tree.setColumnWidth(6, 150)
+        root = self.tree.invisibleRootItem()
         if not root:
             return
-        lay.addWidget(tree)
+        lay.addWidget(self.tree)
         buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         okButton = buttonBox.button(QDialogButtonBox.StandardButton.Ok)
         if okButton:
@@ -633,7 +647,9 @@ class PluginManager:  # noqa: PLR0904
         confParser[INFO] = infoDict('PluginManager')
         for name, item in confParser.items():
             if name != Parameter.DEFAULT.upper() and name != INFO:
-                self.addPluginTreeWidgetItem(tree=tree, item=item, name=name)
+                self.addPluginTreeWidgetItem(item=item, name=name)
+        self.tree.sortByColumn(1, Qt.SortOrder.AscendingOrder)  # name
+        self.tree.sortByColumn(2, Qt.SortOrder.DescendingOrder)  # non optional, enabled, disabled
 
         dlg.setLayout(lay)
         if dlg.exec():
@@ -644,56 +660,95 @@ class PluginManager:  # noqa: PLR0904
                     name = child.text(1)
                     enabled = True
                     internal = True
-                    if tree.itemWidget(child, 2):
-                        enabled = cast('CheckBox', (tree.itemWidget(child, 2))).isChecked()
+                    if self.tree.itemWidget(child, 2):
+                        enabled = cast('CheckBox', (self.tree.itemWidget(child, 2))).isChecked()
                         internal = False
                     if not internal:
                         confParser[name][self.ENABLED] = str(enabled)
+            self.tree.deleteLater()
+            self.tree = None
             with self.pluginFile.open('w', encoding=UTF8) as configFile:
                 confParser.write(configFile)
             self.mainWindow.closeApplication(restart=True)
             QApplication.restoreOverrideCursor()
 
-    def addPluginTreeWidgetItem(self, tree: QTreeWidget, item: Mapping, name: str) -> None:
+    def addPluginTreeWidgetItem(self, item: Mapping, name: str) -> None:
         """Add a row for given plugin. If not a core plugin it can be enabled or disabled using the checkbox.
 
-        :param tree: The tree used to display plugin information.
-        :type tree: QTreeWidget
         :param item: Dictionary with plugin information.
         :type item: Mapping
         :param name: Plugin name.
         :type name: str
         """
-        pluginTreeWidget = QTreeWidgetItem(tree.invisibleRootItem())
-        if item[self.ICONFILE]:
-            pluginTreeWidget.setIcon(0, Icon(Path(item[self.DEPENDENCYPATH]) / (item[self.ICONFILEDARK] if getDarkMode() and item[self.ICONFILEDARK] else item[self.ICONFILE])))
-        else:
-            pluginTreeWidget.setIcon(0, Icon(Path(item[self.DEPENDENCYPATH]) / ('help_large_dark.png' if getDarkMode() else 'help_large.png')))
-        pluginTreeWidget.setText(1, name)
-        if item[self.OPTIONAL] == 'True':
-            checkbox = CheckBox()
-            checkbox.setChecked(item[self.ENABLED] == 'True')
-            tree.setItemWidget(pluginTreeWidget, 2, checkbox)
-        versionLabel = QLabel()
-        versionLabel.setText(item[self.VERSION])
-        tree.setItemWidget(pluginTreeWidget, 3, versionLabel)
-        supportedVersionLabel = QLabel()
-        supportedVersionLabel.setText(item[self.SUPPORTEDVERSION])
-        supportedVersionLabel.setStyleSheet(f"color: {'red' if not pluginSupported(item[self.SUPPORTEDVERSION]) else 'green'}")
-        tree.setItemWidget(pluginTreeWidget, 4, supportedVersionLabel)
-        typeLabel = QLabel()
-        typeLabel.setText(item[self.PLUGIN_TYPE])
-        tree.setItemWidget(pluginTreeWidget, 5, typeLabel)
-        previewFileTypesLabel = QLabel()
-        previewFileTypesLabel.setText(item[self.PREVIEWFILETYPES])
-        previewFileTypesLabel.setToolTip(item[self.PREVIEWFILETYPES])
-        tree.setItemWidget(pluginTreeWidget, 6, previewFileTypesLabel)
-        descriptionLabel = QLabel()
-        description = item[self.DESCRIPTION]
-        if description:
-            descriptionLabel.setText(description.splitlines()[0][:100])
-            descriptionLabel.setToolTip(description)
-        tree.setItemWidget(pluginTreeWidget, 7, descriptionLabel)
+        if self.tree:
+            pluginTreeWidget = QTreeWidgetItem(self.tree.invisibleRootItem())
+            if item[self.ICONFILE]:
+                pluginTreeWidget.setIcon(0, Icon(Path(item[self.DEPENDENCYPATH]) / (item[self.ICONFILEDARK] if getDarkMode() and item[self.ICONFILEDARK] else item[self.ICONFILE])))
+            else:
+                pluginTreeWidget.setIcon(0, Icon(Path(item[self.DEPENDENCYPATH]) / ('help_large_dark.png' if getDarkMode() else 'help_large.png')))
+            pluginTreeWidget.setText(1, name)
+            if item[self.OPTIONAL] == 'True':
+                checkbox = CheckBox()
+                checkbox.setChecked(item[self.ENABLED] == 'True')
+                self.tree.setItemWidget(pluginTreeWidget, 2, checkbox)
+                pluginTreeWidget.setText(2, item[self.ENABLED])
+            else:
+                pluginTreeWidget.setText(2, 'z Not Optional')
+            pluginTreeWidget.setForeground(2, QColor(0, 0, 0, 0))  # make sorting text transparent
+            versionLabel = QLabel()
+            versionLabel.setText(item[self.VERSION])
+            self.tree.setItemWidget(pluginTreeWidget, 3, versionLabel)
+            pluginTreeWidget.setText(3, item[self.VERSION])  # needed for sorting
+            pluginTreeWidget.setForeground(3, QColor(0, 0, 0, 0))  # make sorting text transparent
+            supportedVersionLabel = QLabel()
+            supportedVersionLabel.setText(item[self.SUPPORTEDVERSION])
+            supportedVersionLabel.setStyleSheet(f"color: {'red' if not pluginSupported(item[self.SUPPORTEDVERSION]) else 'green'}")
+            self.tree.setItemWidget(pluginTreeWidget, 4, supportedVersionLabel)
+            pluginTreeWidget.setText(4, item[self.SUPPORTEDVERSION])
+            pluginTreeWidget.setForeground(4, QColor(0, 0, 0, 0))  # make sorting text transparent
+            typeLabel = QLabel()
+            typeLabel.setText(item[self.PLUGIN_TYPE])
+            self.tree.setItemWidget(pluginTreeWidget, 5, typeLabel)
+            pluginTreeWidget.setText(5, item[self.PLUGIN_TYPE])
+            pluginTreeWidget.setForeground(5, QColor(0, 0, 0, 0))  # make sorting text transparent
+            previewFileTypesLabel = QLabel()
+            previewFileTypesLabel.setText(item[self.PREVIEWFILETYPES])
+            previewFileTypesLabel.setToolTip(item[self.PREVIEWFILETYPES])
+            self.tree.setItemWidget(pluginTreeWidget, 6, previewFileTypesLabel)
+            descriptionLabel = QLabel()
+            description = item[self.DESCRIPTION]
+            if description:
+                descriptionLabel.setText(description.splitlines()[0][:100])
+                descriptionLabel.setToolTip(description)
+            self.tree.setItemWidget(pluginTreeWidget, 7, descriptionLabel)
+
+    def toggleSelectionContextMenu(self, pos: QPoint) -> None:
+        """Context menu to toggle selection of plugins.
+
+        :param pos: The position of the context menu.
+        :type pos: QPoint
+        """
+        if self.tree and self.tree.columnAt(pos.x()) == 2:  # noqa: PLR2004
+            item = self.tree.itemAt(pos)
+            widget = self.tree.itemWidget(item, 2)
+            if widget and isinstance(widget, CheckBox):
+                menu = QMenu(self.tree)
+                menu.addAction('Select All', lambda: self.toggleSelection(enabled=True))
+                menu.addAction('Select None', lambda: self.toggleSelection(enabled=False))
+                menu.exec(self.tree.mapToGlobal(pos))
+
+    def toggleSelection(self, enabled: bool) -> None:
+        """Toggle selection of channels. Mostly used for development purposes when running tests with changing selection of plugins.
+
+        :param enabled: Enable all or none of the channels.
+        :type enabled: bool
+        """
+        if self.tree:
+            root = self.tree.invisibleRootItem()
+            if root:
+                for child in [root.child(i) for i in range(root.childCount())]:
+                    if child and self.tree.itemWidget(child, 2):
+                        cast('CheckBox', (self.tree.itemWidget(child, 2))).setChecked(enabled)
 
     def closePlugins(self) -> None:
         """Close all open connections and leave hardware in save state (e.g. voltage off)."""
@@ -890,7 +945,7 @@ class PluginManager:  # noqa: PLR0904
     def connectAllSources(self, update: bool = True) -> None:
         """Connect all available source channels.
 
-        :param update: Indicates that all channels should be (re-)connected. Otherwise will only attempt to connect channels that are not yet connected. Defaults to False
+        :param update: Indicates that all channels should be (re-)connected. Otherwise will only attempt to connect channels that are not yet connected. Defaults to True
         :type update: bool, optional
         """
         # keep docstring synchronized with PID.connectAllSources and UCM.connectAllSources
@@ -902,6 +957,7 @@ class PluginManager:  # noqa: PLR0904
             self.PID.connectAllSources(update=update)
         if hasattr(self, 'UCM'):
             self.UCM.connectAllSources(update=update)
+            self.UCM.clearPlot()
 
     def toggleVideoRecorder(self) -> None:
         """Toggles visibility of videoRecorderActions for all plugins."""
@@ -928,7 +984,7 @@ class Logger(QObject):
     """
 
     printFromThreadSignal = pyqtSignal(str, str, PRINT)
-    MAX_ERROR_COUNT = 10
+    maxErrorCount = 10
 
     def __init__(self, pluginManager: PluginManager) -> None:
         """Initialize a logger.
@@ -1118,7 +1174,7 @@ Generated files: {len(list(self.testLogFilePath.parent.glob('*')))}
             ms = ((datetime.now() - self.lastCallTime).total_seconds() * 1000) if self.lastCallTime is not None else 0
             timerString = f'🕐 {ms:5.0f} ms '
             self.lastCallTime = datetime.now()
-        first_line = message.split('\n')[0]
+        first_line = message.split('\n', maxsplit=1)[0]
         sender = sender + ':' if sender else ''  # no : needed if no explicit sender
         message_status = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {sender} {first_line}"
         message = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {timerString}{flagString} {sender} {message}"
@@ -1215,9 +1271,9 @@ class DynamicNp:
         self.max_size = max_size
 
     def add(self, x: float, lenT: 'int | None' = None) -> None:
-        """Add the new data point and adjusts the data array as required.
+        """Add the new data point and adjust the data array as required.
 
-        :param x: Datapoint to be added
+        :param x: Datapoint or array to be added
         :type x: float
         :param lenT: length of corresponding time array, defaults to None
         :type lenT: int, optional
@@ -1286,6 +1342,7 @@ class Parameter:  # noqa: PLR0904
 
     # general keys
     NAME = 'Name'
+    UNIT = 'Unit'
     ATTR = 'Attribute'
     ADVANCED = 'Advanced'
     HEADER = 'Header'
@@ -1299,6 +1356,8 @@ class Parameter:  # noqa: PLR0904
     TOOLTIP = 'Tooltip'
     EVENT = 'Event'
     INTERNAL = 'Internal'
+    RECORDED = 'Recorded'
+    LOGY = 'logY'
     INDICATOR = 'Indicator'
     RESTORE = 'Restore'
     INSTANTUPDATE = 'InstantUpdate'
@@ -1312,6 +1371,10 @@ class Parameter:  # noqa: PLR0904
     """Minimum limit for numerical properties."""
     max: 'float | None'
     """Maximum limit for numerical properties."""
+    unit: str = ''
+    """Physical unit of the parameter."""
+    color: str = ''
+    """Color of the parameter. Needed to plot recorded parameters."""
     toolTip: str
     """Tooltip used to describe the parameter."""
     fixedItems: bool
@@ -1333,6 +1396,15 @@ class Parameter:  # noqa: PLR0904
     instead of configuration files. This can help to reduce clutter in
     configuration files and restore essential parameters even if
     configuration files get moved or lost."""
+    recorded: bool
+    """Indicates that this parameter will be recorded, just like the channel values or backgrounds."""
+    display: bool = False
+    """Indicates that this parameter will be displayed, just like the channel values or backgrounds."""
+    plotCurve: 'PlotCurveItem | PlotDataItem | None'
+    """The plotCurve in the corresponding :class:`~esibd.plugins.LiveDisplay`."""
+    values: DynamicNp
+    """The history of values shown in the :class:`~esibd.plugins.LiveDisplay`.
+       Use :meth:`~esibd.core.Channel.getValues` to get a plain numpy.array."""
     attr: str
     """Allows direct access to the parameter. Only applies to channel and settings parameters.
 
@@ -1366,13 +1438,24 @@ class Parameter:  # noqa: PLR0904
     """Widget used to display the value of the parameter. None if parameter is part of a channel. Defined if it is part of a Setting."""
     extraEvents: list[Callable]
     """Used to add internal events on top of the user assigned ones."""
+    extraContextActions: list['ContextAction']
+    """List of extra actions for the parameter context menu."""
+    logY: bool
+    """Indicates if logarithmic controls and scales should be used."""
+    clearingPlotCurve = False
+    """Flag to prevent multiple clearing attempts at the same time."""
+
+    class SignalCommunicate(QObject):
+        """Bundle pyqtSignals."""
+
+        updateValueSignal = pyqtSignal(object)
 
     def __init__(self, name: str, parameterParent: 'SettingsManager | Channel', default: 'ParameterType | None' = None,  # noqa: PLR0913, PLR0917
-                  parameterType: 'PARAMETERTYPE | None' = None,
-                 column: int = 1, items: str = '', fixedItems: bool = False, widget: 'QWidget | None' = None, internal: bool = False,
-                    tree: 'QTreeWidget | None' = None, itemWidget: 'QTreeWidgetItem | None' = None, toolTip: str = '', event: 'Callable | None' = None,
-                      minimum: 'float | None' = None, maximum: 'float | None' = None, indicator: bool = False, restore: bool = True,
-                        instantUpdate: bool = True, displayDecimals: int = 2) -> None:
+                parameterType: 'PARAMETERTYPE | None' = None,
+                column: int = 1, items: str = '', fixedItems: bool = False, widget: 'QWidget | None' = None, internal: bool = False, recorded: bool = False,
+                tree: 'QTreeWidget | None' = None, itemWidget: 'QTreeWidgetItem | None' = None, toolTip: str = '', event: 'Callable | None' = None,
+                minimum: 'float | None' = None, maximum: 'float | None' = None, unit: str = '', indicator: bool = False, restore: bool = True,
+                instantUpdate: bool = True, displayDecimals: int = 2, logY: bool = False) -> None:
         """Initialize a Parameter.
 
         :param name: Parameter name.
@@ -1393,6 +1476,8 @@ class Parameter:  # noqa: PLR0904
         :type widget: QWidget, optional
         :param internal: Save to registry instead of file if internal, defaults to False
         :type internal: bool, optional
+        :param recorded: Indicates that this parameter will be recorded, just like the channel values or backgrounds, defaults to False
+        :type recorded: bool, optional
         :param tree: Tree containing the parameter, defaults to None
         :type tree: QTreeWidget, optional
         :param itemWidget: Item in Tree containing the parameter, defaults to None
@@ -1405,6 +1490,8 @@ class Parameter:  # noqa: PLR0904
         :type minimum: float | None, optional
         :param maximum: Maximal allowed value, defaults to None
         :type maximum: float | None, optional
+        :param unit: The physical unit of the parameter, defaults to ''
+        :type unit: str, optional
         :param indicator: Indicators cannot be edited by the user, defaults to False
         :type indicator: bool, optional
         :param restore: Determine if the parameter will be saved and restored, defaults to True
@@ -1433,9 +1520,13 @@ class Parameter:  # noqa: PLR0904
         self.itemWidget = itemWidget
         self.widget = widget
         self.extraEvents = []
+        self.extraContextActions = []
         self._valueChanged = False
         self.event = event
         self.internal = internal
+        self.recorded = recorded
+        self.logY = logY
+        self.plotCurve = None
         self.indicator = indicator
         self.restore = restore
         self.instantUpdate = instantUpdate
@@ -1445,6 +1536,7 @@ class Parameter:  # noqa: PLR0904
         self.check: 'CheckBox | LedIndicator | None' = None
         self.min = minimum
         self.max = maximum
+        self.unit = unit
         self.button: 'PushButton | None' = None
         self.spin: 'LabviewSpinBox | LabviewDoubleSpinBox | LabviewSciSpinBox | None' = None
         self.loading = False
@@ -1453,6 +1545,8 @@ class Parameter:  # noqa: PLR0904
             self.default = default
         if not self.tree:  # if this is part of a QTreeWidget, applyWidget() should be called after this Parameter is added to the tree
             self.applyWidget()  # call after everything else is initialized but before setting value
+        self.signalComm = self.SignalCommunicate()
+        self.signalComm.updateValueSignal.connect(self.updateValueParallel)
 
     @property
     def value(self) -> 'ParameterType | None':  # noqa: C901
@@ -1536,6 +1630,116 @@ class Parameter:  # noqa: PLR0904
         """
         self.value = value
         self._valueChanged = False
+
+    def getValues(self, *, length: 'int | None' = None, index_min: 'int | None' = None,
+                  index_max: 'int | None' = None, n: int = 1, **kwargs) -> np.typing.NDArray[np.float64 | np.float32]:  # pylint: disable = unused-argument  # use consistent arguments for all versions of getValues  # noqa: ARG002
+        """Return plain Numpy array of values.
+
+        Signature matching :meth:`~esibd.core.Channel.getValues`
+
+        :param length: will return last 'length' values.
+        :type length: int
+        :param index_min: Index of lower limit.
+        :type index_min: int
+        :param index_max: Index of upper limit.
+        :type index_max: int
+        :param n: Will only return every nth value, defaults to 1
+        :type n: int, optional
+        :param kwargs: Used to match signature with :meth:`~esibd.core.Channel.getValues`. Note that the subtractBackground keyword will be ignored.
+        :type kwargs:
+        :return: The array of values.
+        :rtype: np.ndarray[Any, np.dtype[np.float32]]
+        """
+        return self.values.get(length=length, index_min=index_min, index_max=index_max, n=n) if self.recorded else None  # type: ignore  # noqa: PGH003
+
+    def updateDisplay(self) -> None:
+        """Toggle display of parameter."""
+        self.display = not self.display
+        self.clearPlotCurve()
+        if isinstance(self.parameterParent, Channel):
+            self.parameterParent.updateDisplay()
+
+    @property
+    def legendName(self) -> str:
+        """Return full Name including channel and parameter name if applicable."""
+        return f'{self.parameterParent.name}.{self.name}' if isinstance(self.parameterParent, Channel) else self.name
+
+    @property
+    def linewidth(self) -> int:
+        """Return linewidth of the associated Channel if applicable."""
+        return self.parameterParent.linewidth if isinstance(self.parameterParent, Channel) else 4
+
+    @property
+    def enabled(self) -> bool:
+        """Return enabled of the associated Channel if applicable."""
+        return self.parameterParent.enabled if isinstance(self.parameterParent, Channel) else False
+
+    @property
+    def real(self) -> bool:
+        """Return real of the associated Channel if applicable."""
+        return self.parameterParent.real if isinstance(self.parameterParent, Channel) else False
+
+    @property
+    def smooth(self) -> int:
+        """Return smooth of the associated Channel if applicable."""
+        return self.parameterParent.smooth if isinstance(self.parameterParent, Channel) else 0
+
+    @property
+    def displayGroup(self) -> str:
+        """Return displayGroup of the associated Channel if applicable."""
+        return self.parameterParent.displayGroup if isinstance(self.parameterParent, Channel) else '1'
+
+    @property
+    def time(self) -> DynamicNp | None:
+        """Return time of the associated Channel if applicable."""
+        return self.parameterParent.time if isinstance(self.parameterParent, Channel) else None
+
+    def getDevice(self) -> 'ChannelManager | Device | Scan':
+        """Return the device of the associated Channel if applicable."""
+        return self.parameterParent.getDevice() if isinstance(self.parameterParent, Channel) else None  # type: ignore  # noqa: PGH003
+
+    def getQtLineStyle(self) -> Qt.PenStyle:
+        """Return the linestyle of the associated Channel if applicable."""
+        return self.parameterParent.getQtLineStyle() if isinstance(self.parameterParent, Channel) else Qt.PenStyle.SolidLine
+
+    def clearPlotCurve(self) -> None:
+        """Clear the plotCurve."""
+        if self.plotCurve and not self.clearingPlotCurve:
+            self.clearingPlotCurve = True
+            device = self.getDevice()
+            self.plotCurve.curveParent.removeItem(self.plotCurve)  # plotWidget still tries to access this even if deleted -> need to explicitly remove!
+            if isinstance(self.plotCurve.curveParent, ViewBox):
+                self.plotCurve.curveLegend.removeItem(self.plotCurve)
+            self.plotCurve.clear()
+            self.plotCurve.deleteLater()
+            self.plotCurve = None
+            if isinstance(device, self.parameterParent.pluginManager.Device) and device.liveDisplay:
+                device.liveDisplay.updateLegend = True
+            self.clearingPlotCurve = False
+
+    def convertDataDisplay(self, data: np.ndarray) -> np.ndarray:
+        """Overwrite to apply scaling and offsets to data before it is displayed. Use, e.g., to convert to another unit.
+
+        This should only affect display in :class:`LiveDisplays<esibd.plugins.LiveDisplay>`.
+
+        :param data: Original data.
+        :type data: np.ndarray
+        :return: Scaled data.
+        :rtype: np.ndarray
+        """
+        return data
+
+    def getDisplayUnit(self) -> str:
+        """Return the parameter unit."""
+        return self.unit
+
+    def updateValueParallel(self, value: ParameterType) -> None:  # used to update from external threads
+        """Update the value (thread safe).
+
+        :param value: new value
+        :type value: ParameterType
+        """
+        self.value = value  # pylint: disable=[attribute-defined-outside-init]  # attribute defined by makeWrapper
 
     @property
     def default(self) -> 'ParameterType | None':
@@ -1859,7 +2063,7 @@ class Parameter:  # noqa: PLR0904
             self.combo.setItemText(self.combo.currentIndex(), str(value))
             self.changedEvent()  # is not triggered by setItemText
 
-    def validateComboInput(self, value: str) -> bool:
+    def validateComboInput(self, value: str) -> bool:  # noqa: PLR0911
         """Validate input for comboboxes.
 
         :param value: The new value to be validated.
@@ -1876,6 +2080,9 @@ class Parameter:  # noqa: PLR0904
                 self.print(f'{value} is not an integer!', flag=PRINT.ERROR)
                 return False
             else:
+                if self.min is not None and self.max is not None:
+                    self.print(f'{value} is not in allowed range from {self.min} to {self.max}!', flag=PRINT.ERROR)
+                    return self.min < int(value) < self.max
                 return True
         elif self.parameterType == PARAMETERTYPE.FLOATCOMBO:
             try:
@@ -1884,6 +2091,9 @@ class Parameter:  # noqa: PLR0904
                 self.print(f'{value} is not a float!', flag=PRINT.ERROR)
                 return False
             else:
+                if self.min is not None and self.max is not None:
+                    self.print(f'{value} is not in allowed range from {self.min} to {self.max}!', flag=PRINT.ERROR)
+                    return self.min < float(value) < self.max
                 return True
         return False
 
@@ -1912,11 +2122,13 @@ class Parameter:  # noqa: PLR0904
             equals = self.value == value
         return equals
 
-    def formatValue(self, value: 'ParameterType | None' = None) -> str:
+    def formatValue(self, value: 'ParameterType | None' = None, escapePercent: bool = False) -> str:
         """Format value as a string, depending on Parameter type.
 
         :param value: A value to be formatted using the Parameter formatting, defaults to None and uses self.value
         :type value: ParameterType, optional
+        :param escapePercent: % has to be escaped by %% for use with configparser.
+        :type escapePercent: bool
         :return: Formatted value as text.
         :rtype: str
         """
@@ -1929,7 +2141,7 @@ class Parameter:  # noqa: PLR0904
             if self.parameterType == PARAMETERTYPE.EXP:
                 return f'{float(cast("float", value)):.{self.displayDecimals}e}'
             return f'{float(cast("str | float", value)):.{self.displayDecimals}f}'
-        return str(value)
+        return str(value).replace('%', '%%') if escapePercent else str(value)
 
     def initContextMenu(self, pos: QPoint) -> None:
         """Initialize the context menu of the parent at the location of the Parameter.
@@ -1943,10 +2155,11 @@ class Parameter:  # noqa: PLR0904
 
 
 def parameterDict(name: str = '', value: 'ParameterType | None' = None, default: 'ParameterType | None' = None, minimum: 'float | None' = None, maximum: 'float | None' = None,  # noqa: PLR0913, PLR0917
-                   toolTip: str = '', items: 'str | None' = None,
-                  fixedItems: bool = False, tree: 'QTreeWidget | None' = None, parameterType: 'PARAMETERTYPE | None' = None, advanced: bool = False, header: str = '',
-                    widget: 'QWidget | None' = None, event: 'Callable | None' = None, internal: bool = False, attr: str = '', indicator: bool = False, restore: bool = True,
-                    instantUpdate: bool = True, displayDecimals: int = 2) -> dict[str, ParameterType | QTreeWidget | PARAMETERTYPE | QWidget | Callable | None]:
+                unit: str = '', toolTip: str = '', items: 'str | None' = None,
+                fixedItems: bool = False, tree: 'QTreeWidget | None' = None, parameterType: 'PARAMETERTYPE | None' = None, advanced: bool = False, header: str = '',
+                widget: 'QWidget | None' = None, event: 'Callable | None' = None, internal: bool = False, recorded: bool = False,
+                attr: str = '', indicator: bool = False, restore: bool = True, logY: bool = False,
+                instantUpdate: bool = True, displayDecimals: int = 2) -> dict[str, ParameterType | QTreeWidget | PARAMETERTYPE | QWidget | Callable | None]:
     """Provide default values for all properties of a Parameter.
 
     :param name: The Parameter name. Only use last element of :attr:`~esibd.core.Parameter.fullName` in case its a path, defaults to ''
@@ -1959,6 +2172,8 @@ def parameterDict(name: str = '', value: 'ParameterType | None' = None, default:
     :type minimum: float, optional
     :param maximum: Maximum limit for numerical properties., defaults to None
     :type maximum: float, optional
+    :param unit: The physical unit of the parameter., defaults to ''
+    :type unit: str, optional
     :param toolTip: ToolTip used to describe the Parameter, defaults to ''
     :type toolTip: str, optional
     :param items: Coma separated list of options for parameters with a comboBox, defaults to None
@@ -1980,12 +2195,16 @@ def parameterDict(name: str = '', value: 'ParameterType | None' = None, default:
     :param internal: Set to True to save Parameter value in the registry (using QSetting) instead of configuration files.
         This can help to reduce clutter in configuration files and restore essential Parameters even if configuration files get moved or lost. Defaults to False
     :type internal: bool, optional
+    :param recorded: Indicates that this parameter will be recorded, just like the channel values or backgrounds, defaults to False
+    :type recorded: bool, optional
     :param attr: Allows direct access to the Parameter. Only applies to Channel and Settings Parameters. Defaults to ''
     :type attr: str, optional
     :param indicator: Indicators cannot be edited by the user, defaults to False
     :type indicator: bool, optional
     :param restore: Indicates if the parameter will be restored, defaults to True. Note that temp parameters of channels will never be restored.
     :type restore: bool, optional
+    :param logY: Indicates if logarithmic controls and scales should be used.
+    :type logY: bool, optional
     :param instantUpdate: By default, events are triggered as soon as the value changes.
         If set to False, certain events will only be triggered if editing is finished by the *enter* key or if the widget loses focus. Defaults to True
     :type instantUpdate: bool, optional
@@ -1995,10 +2214,10 @@ def parameterDict(name: str = '', value: 'ParameterType | None' = None, default:
     :rtype: dict[str, ParameterType]
     """
     return {Parameter.NAME: name, Parameter.VALUE: value, Parameter.DEFAULT: default if default is not None else value, Parameter.MIN: minimum, Parameter.MAX: maximum,
-             Parameter.ADVANCED: advanced, Parameter.HEADER: header, Parameter.TOOLTIP: toolTip, Parameter.ITEMS: items, Parameter.FIXEDITEMS: fixedItems,
-               Parameter.TREE: tree, Parameter.PARAMETER_TYPE: parameterType, Parameter.WIDGET: widget, Parameter.EVENT: event, Parameter.INTERNAL: internal,
-                 Parameter.ATTR: attr, Parameter.INDICATOR: indicator, Parameter.RESTORE: restore, Parameter.INSTANTUPDATE: instantUpdate,
-                   Parameter.DISPLAYDECIMALS: displayDecimals}
+            Parameter.UNIT: unit, Parameter.ADVANCED: advanced, Parameter.HEADER: header, Parameter.TOOLTIP: toolTip, Parameter.ITEMS: items, Parameter.FIXEDITEMS: fixedItems,
+            Parameter.TREE: tree, Parameter.PARAMETER_TYPE: parameterType, Parameter.WIDGET: widget, Parameter.EVENT: event, Parameter.INTERNAL: internal,
+            Parameter.RECORDED: recorded, Parameter.ATTR: attr, Parameter.INDICATOR: indicator, Parameter.RESTORE: restore, Parameter.INSTANTUPDATE: instantUpdate,
+            Parameter.DISPLAYDECIMALS: displayDecimals, Parameter.LOGY: logY}
 
 
 class Setting(QTreeWidgetItem, Parameter):
@@ -2086,9 +2305,10 @@ class Setting(QTreeWidgetItem, Parameter):
 class RelayChannel:
     """Channel that wraps another sourceChannel. Used to display and access some elements of sourceChannel in other parts of the program."""
 
-    sourceChannel: 'Channel | None'
-    recordingData: 'np.ndarray | DynamicNp | None'
-    recordingBackground: 'np.ndarray | DynamicNp | None'
+    sourceChannel: 'Channel | None' = None
+    sourceParameter: 'Parameter | None' = None
+    recordingData: 'np.ndarray | DynamicNp | None' = None
+    recordingBackground: 'np.ndarray | DynamicNp | None' = None
     channelParent: 'Device'
     unit: 'str'
 
@@ -2109,7 +2329,7 @@ class RelayChannel:
         """SourceChannel.recording if available. Default provided."""
         return self.sourceChannel.getDevice().recording if self.sourceChannel else False
 
-    def getValues(self, length: 'int | None' = None, index_min: 'int | None' = None,
+    def getValues(self, *, length: 'int | None' = None, index_min: 'int | None' = None,
                    index_max: 'int | None' = None, n: int = 1, subtractBackground: bool = False) -> 'np.ndarray | None':
         """SourceChannel.getValues() if available. Default provided.
 
@@ -2126,7 +2346,7 @@ class RelayChannel:
         :return: The array of values.
         :rtype: np.ndarray
         """
-        return self.sourceChannel.getValues(length, index_min, index_max, n, subtractBackground) if self.sourceChannel else None
+        return self.sourceChannel.getValues(length=length, index_min=index_min, index_max=index_max, n=n, subtractBackground=subtractBackground) if self.sourceChannel else None
 
     @property
     def value(self) -> int | float:  # | None:
@@ -2182,7 +2402,11 @@ class RelayChannel:
     @property
     def color(self) -> str:
         """SourceChannel.color if available. Default provided."""
-        return self.sourceChannel.color if self.sourceChannel else '#ffffff'
+        if self.sourceParameter:
+            return self.sourceParameter.color
+        if self.sourceChannel:
+            return self.sourceChannel.color
+        return '#e8e8e8'
 
     @property
     def linewidth(self) -> int:
@@ -2281,7 +2505,7 @@ class MetaChannel(RelayChannel):
                 self.sourceChannel = self.parentPlugin.pluginManager.DeviceManager.getChannelByName(self.name, inout=INOUT.IN)
         else:
             self.sourceChannel = self.parentPlugin.pluginManager.DeviceManager.getChannelByName(self.name, inout=self.inout)
-        if self.sourceChannel:
+        if self.sourceChannel and hasattr(self.sourceChannel, Parameter.VALUE.lower()):
             self.initialValue = self.sourceChannel.value
             self.unit = self.sourceChannel.unit
             self.updateValueSignal = self.sourceChannel.signalComm.updateValueSignal
@@ -2354,6 +2578,8 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
     """Indicates if logarithmic controls and scales should be used."""
     waitToStabilize = False
     """Indicates if the device is stabilized. Will return NaN if unstable."""
+    invalid_chars: list[str]
+    """Invalid characters will be removed from list of valid characters of the channel name."""
     controller: 'DeviceController'
 
     def __init__(self, channelParent: 'ChannelManager | Scan', tree: 'QTreeWidget | None' = None) -> None:
@@ -2388,12 +2614,10 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         self.defaultStyleSheet = None  # will be initialized when color is set
         self.warningStyleSheet = 'background: rgb(255,0,0)'
         self.warningState = False
+        self.invalid_chars = [r'\.', '/']
 
         if isinstance(self.channelParent, self.pluginManager.ChannelManager):
-            self.values = DynamicNp(max_size=self.channelParent.maxDataPoints)
             self.inout = self.channelParent.inout
-            if self.inout != INOUT.NONE and self.useBackgrounds:
-                self.backgrounds = DynamicNp(max_size=self.channelParent.maxDataPoints)
 
         # Generate property for direct access of Parameter values.
         # NOTE: This assigns properties directly to class and only works as it uses a method that is specific to the current instance.
@@ -2406,17 +2630,22 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
 
         for column, (name, default) in enumerate(self.getSortedDefaultChannel().items()):
             self.parameters.append(Parameter(parameterParent=self, name=name, parameterType=default[Parameter.PARAMETER_TYPE],
-                                                    items=default.get(Parameter.ITEMS, ''),
-                                                    fixedItems=default.get(Parameter.FIXEDITEMS, False),
-                                                    minimum=default.get(Parameter.MIN, None), maximum=default.get(Parameter.MAX, None),
-                                                    toolTip=default.get(Parameter.TOOLTIP, ''),
-                                                    internal=default.get(Parameter.INTERNAL, False),
-                                                    indicator=default.get(Parameter.INDICATOR, False),
-                                                    restore=default.get(Parameter.RESTORE, True),
-                                                    instantUpdate=default.get(Parameter.INSTANTUPDATE, True),
-                                                    displayDecimals=default.get(Parameter.DISPLAYDECIMALS, 2),
-                                                    itemWidget=self, column=column, tree=self.tree,
-                                                    event=default.get(Parameter.EVENT, None)))
+                                            items=default.get(Parameter.ITEMS, ''),
+                                            fixedItems=default.get(Parameter.FIXEDITEMS, False),
+                                            minimum=default.get(Parameter.MIN, None), maximum=default.get(Parameter.MAX, None),
+                                            unit=default.get(Parameter.UNIT, ''),
+                                            toolTip=default.get(Parameter.TOOLTIP, ''),
+                                            internal=default.get(Parameter.INTERNAL, False),
+                                            recorded=default.get(Parameter.RECORDED, False),
+                                            logY=default.get(Parameter.LOGY, False),
+                                            indicator=default.get(Parameter.INDICATOR, False),
+                                            restore=default.get(Parameter.RESTORE, True),
+                                            instantUpdate=default.get(Parameter.INSTANTUPDATE, True),
+                                            displayDecimals=default.get(Parameter.DISPLAYDECIMALS, 2),
+                                            itemWidget=self, column=column, tree=self.tree,
+                                            event=default.get(Parameter.EVENT, None)))
+
+        self.clearHistoryInternal()  # clearHistory call during initialization initializes history
     HEADER = 'HEADER'
     SELECT = 'Select'
     COLLAPSE = 'Collapse'
@@ -2456,6 +2685,16 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         """The unit of the corresponding device."""
         device = self.getDevice()
         return device.unit if isinstance(device, self.pluginManager.Device) else ''
+
+    def getDisplayUnit(self) -> str:
+        """Return the unit of the corresponding device. May represent display unit if defined."""
+        device = self.getDevice()
+        return device.getDisplayUnit() if isinstance(device, self.pluginManager.Device) else self.unit
+
+    @property
+    def legendName(self) -> str:
+        """Name used in legends. Matches signature of Parameters."""
+        return self.name
 
     @property
     def time(self) -> DynamicNp | None:
@@ -2567,7 +2806,7 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             channel[self.LINESTYLE] = parameterDict(value='solid', parameterType=PARAMETERTYPE.COMBO, advanced=True,
                                             items='solid, dotted, dashed, dashdot', attr='linestyle', event=self.updateDisplay, toolTip='Line style used in plots.')
             channel[self.DISPLAYGROUP] = parameterDict(value='1', default='1', parameterType=PARAMETERTYPE.COMBO, advanced=True, attr='displayGroup', event=self.updateDisplay,
-                                                           items='0, 1, 2, 3, 4, 5', fixedItems=False, toolTip='Used to group channels in the live display.')
+                                                           items='0, 1, 2, 3, 4, 5, 6, 7, 8, 9', fixedItems=False, toolTip='Used to group channels in the live display.')
         if self.inout == INOUT.IN:
             channel[self.MIN] = parameterDict(value=-50, parameterType=PARAMETERTYPE.FLOAT, advanced=True,
                                     event=self.updateMin, attr='min', header='Min       ')
@@ -2640,20 +2879,26 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             self.print(f'Could not find Parameter {name}.', flag=PRINT.DEBUG)
         return parameter  # type: ignore  # noqa: PGH003 Rather ignore None warning once here than deal with it for every function call.
 
-    def asDict(self, includeTempParameters: bool = False, formatValue: bool = False) -> dict[str, ParameterType]:
+    def getRecordedParameters(self) -> list[Parameter]:
+        """Return parameters that are recorded."""
+        return [parameter for parameter in self.parameters if parameter.recorded]
+
+    def asDict(self, includeTempParameters: bool = False, formatValue: bool = False, escapePercent: bool = False) -> dict[str, ParameterType]:
         """Return a dictionary containing all Channel Parameters and their values.
 
         :param includeTempParameters: If True, dict will contain temporary Parameters, Defaults to False
         :type includeTempParameters: bool, optional
         :param formatValue: Indicates if the value should be formatted as a string, Defaults to False
         :type formatValue: bool, optional
+        :param escapePercent: % has to be escaped by %% for use with configparser.
+        :type escapePercent: bool
         :return: The channel as dictionary.
         :rtype: dict[str, ParameterType]
         """
         channel_dict = {}
         for parameter in self.parameters:
             if includeTempParameters or parameter.name not in self.tempParameters():
-                channel_dict[parameter.name] = parameter.formatValue() if formatValue else parameter.value
+                channel_dict[parameter.name] = parameter.formatValue(escapePercent=escapePercent) if formatValue else parameter.value
         return channel_dict
 
     def updateValueParallel(self, value: float) -> None:  # used to update from external threads
@@ -2710,7 +2955,7 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         """Wait for signal to stabilize.
 
         Will return NaN until stable.
-        Make sure to call from the mainThread.
+        Make sure to call from the main_thread.
 
         :param wait: Wait time in ms.
         :type wait: int
@@ -2722,7 +2967,7 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         """Indicate signal is stable."""
         self.waitToStabilize = False
 
-    def appendValue(self, lenT: int, nan: bool = False) -> None:
+    def appendValue(self, lenT: int, nan: bool = False) -> None:  # noqa: C901
         """Append a datapoint to the recorded values.
 
         :param lenT: length of corresponding time array, defaults to None
@@ -2736,6 +2981,8 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             if self.useMonitors:
                 self.monitor = np.nan
             self.values.add(x=np.nan, lenT=lenT)
+            for parameter in self.getRecordedParameters():
+                parameter.values.add(x=np.nan, lenT=lenT)
         elif self.useMonitors and self.enabled and self.real:
             if self.monitor is not None:
                 self.values.add(x=self.monitor, lenT=lenT)
@@ -2743,8 +2990,11 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             self.values.add(x=self.value, lenT=lenT)
         if self.useBackgrounds:
             self.backgrounds.add(x=self.background, lenT=lenT)
+        for parameter in self.getRecordedParameters():
+            if isinstance(parameter.value, (float, int)):
+                parameter.values.add(x=parameter.value, lenT=lenT)
 
-    def getValues(self, length: 'int | None' = None, index_min: 'int | None' = None, index_max: 'int | None' = None, n: int = 1,
+    def getValues(self, *, length: 'int | None' = None, index_min: 'int | None' = None, index_max: 'int | None' = None, n: int = 1,
                    subtractBackground: bool = False) -> np.typing.NDArray[np.float64 | np.float32]:  # pylint: disable = unused-argument  # use consistent arguments for all versions of getValues
         """Return plain Numpy array of values.
 
@@ -2764,36 +3014,64 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         :rtype: np.ndarray[Any, np.dtype[np.float32]]
         """
         if self.useBackgrounds and subtractBackground:
-            return (self.values.get(length=length, index_min=index_min, index_max=index_max, n=n) -
-                    self.backgrounds.get(length=length, index_min=index_min, index_max=index_max, n=n))
+            values = self.values.get(length=length, index_min=index_min, index_max=index_max, n=n)
+            backgrounds = self.backgrounds.get(length=length, index_min=index_min, index_max=index_max, n=n)
+            if values.shape[0] == backgrounds.shape[0]:
+                return (values - backgrounds)
+            if isinstance(self.channelParent, self.pluginManager.Device):
+                self.print(f'Channel {self.name}: Values and backgrounds have inconsistent size. Using values only. Will be repaired after next recording.'
+                           f' Otherwise check for corrupt restore file {Path(self.pluginManager.Settings.configPath) / self.channelParent.confh5.strip("_")}.\n'
+                           'Delete restore file to regenerate it (all history will be lost!) or repair it manually.', flag=PRINT.WARNING)
+            else:
+                self.print('Channel {self.name}: Values and backgrounds have inconsistent size. Using values only. Will be repaired after next recording.', flag=PRINT.WARNING)
         return self.values.get(length=length, index_min=index_min, index_max=index_max, n=n)
 
     def clearHistory(self) -> None:  # overwrite as needed, e.g. when keeping history of more than one parameter
         """Clear all history data including backgrounds if applicable."""
+        self.clearHistoryInternal()
+
+    def clearHistoryInternal(self) -> None:
+        """Clear all history data including backgrounds if applicable."""
+        # only used for initialization
         if isinstance(self.channelParent, self.pluginManager.Device):
             if self.pluginManager.DeviceManager and (self.pluginManager.Settings and not self.pluginManager.Settings.loading):
                 self.values = DynamicNp(max_size=self.channelParent.maxDataPoints)
             self.clearPlotCurve()
             if self.useBackgrounds:
                 self.backgrounds = DynamicNp(max_size=self.channelParent.maxDataPoints)
+            for parameter in self.getRecordedParameters():
+                parameter.values = DynamicNp(max_size=self.channelParent.maxDataPoints)
 
     def clearPlotCurve(self) -> None:
         """Clear the plot curve. It will be recreated (with updated values and settings) next time plot is called."""
         device = self.getDevice()
-        if self.plotCurve and isinstance(device, self.pluginManager.ChannelManager):
-            # all plot curves need to have a curveParent so they can be removed gracefully
-            self.plotCurve.curveParent.removeItem(self.plotCurve)  # plotWidget still tries to access this even if deleted -> need to explicitly remove!
-            if isinstance(self.plotCurve.curveParent, ViewBox):
-                self.plotCurve.curveLegend.removeItem(self.plotCurve)
-            self.plotCurve.clear()
-            self.plotCurve.deleteLater()
-            self.plotCurve = None
-            if device.liveDisplay:
-                device.liveDisplay.updateLegend = True
+        if isinstance(device, self.pluginManager.ChannelManager):
+            if self.plotCurve:
+                # all plot curves need to have a curveParent so they can be removed gracefully
+                self.plotCurve.curveParent.removeItem(self.plotCurve)  # plotWidget still tries to access this even if deleted -> need to explicitly remove!
+                if isinstance(self.plotCurve.curveParent, ViewBox):
+                    self.plotCurve.curveLegend.removeItem(self.plotCurve)
+                self.plotCurve.clear()
+                self.plotCurve.deleteLater()
+                self.plotCurve = None
+                if device.liveDisplay:
+                    device.liveDisplay.updateLegend = True
+            for parameter in self.getRecordedParameters():
+                parameter.clearPlotCurve()
 
     def getDevice(self) -> 'ChannelManager | Device | Scan':
         """Get the device. Overwrite for more specific cases like relay channels where the channel parent is not the device."""
         return self.channelParent
+
+    def getIcon(self, desaturate: bool = False) -> 'Icon':
+        """Get the channel Icon. This is typically identical with the corresponding device Icon, but some devices may have channel specific Icons.
+
+        :param desaturate: Indicates if color should be removed from icon, defaults to False
+        :type desaturate: bool, optional
+        :return: Icon
+        :rtype: :class:`~esibd.core.Icon`
+        """
+        return self.getDevice().getIcon(desaturate=desaturate)
 
     def getQtLineStyle(self) -> Qt.PenStyle:
         """Get Qt.PenStyle matching matplotlib linestyle."""
@@ -2807,7 +3085,7 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             case _:  # solid
                 return Qt.PenStyle.SolidLine
 
-    def updateColor(self) -> QColor:
+    def updateColor(self) -> QColor:  # noqa: C901, PLR0912
         """Apply new color to all controls."""
         if getDarkMode():
             color = QColor(self.color).darker(150) if self.active else QColor(self.color).darker(200)  # indicate passive channels by darker color
@@ -2816,7 +3094,14 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         qb = QBrush(color)
         for i in range(len(self.parameters) + 1):  # use highest index
             self.setBackground(i, qb)  # use correct color even when widgets are hidden
+        i = 0
         for parameter in self.parameters:
+            if parameter.recorded:
+                # vary color slightly to help distinguish recorded parameters from recorded channel values.
+                i += 1
+                parameter.color = similar_but_distinct_color(color_hex=self.color, index=i)
+            else:
+                parameter.color = self.color
             widget = parameter.getWidget()
             if widget:
                 widget.container.setStyleSheet(f'background-color: {color.name()};')
@@ -2851,11 +3136,11 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             case 'normal':
                 self.rowHeight = normalHeight
             case 'large':
-                self.rowHeight = normalHeight * 2
+                self.rowHeight = normalHeight * 1.5
             case 'larger':
-                self.rowHeight = normalHeight * 4
+                self.rowHeight = normalHeight * 2
             case _:  # 'huge'
-                self.rowHeight = normalHeight * 6
+                self.rowHeight = normalHeight * 4
         for parameter in self.parameters:
             parameter.setHeight(self.rowHeight)
         if not self.loading and self.tree:
@@ -2863,20 +3148,21 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
 
     def sizeHint(self, column) -> QSize:  # pylint: disable = missing-param-doc, missing-type-doc  # noqa: ANN001, ARG002
         """Provide a custom size hint based on the item's content."""
-        return QSize(100, self.rowHeight)  # Width is not relevant
+        return QSize(100, int(self.rowHeight))  # Width is not relevant
 
     def realChanged(self) -> None:
         """Extend as needed. Already linked to real checkbox."""
-        enabledWidget = self.getParameterByName(self.ENABLED).getWidget()
-        if enabledWidget:
-            enabledWidget.setVisible(self.real)
-            self.toggleBackgroundVisible()
-            if self.useMonitors:
-                monitorWidget = self.getParameterByName(self.MONITOR).getWidget()
-                if monitorWidget:
-                    monitorWidget.setVisible(self.real)
-            if not self.channelParent.loading:
-                self.pluginManager.DeviceManager.globalUpdate(inout=self.inout)
+        if self.ENABLED in self.displayedParameters:
+            enabledWidget = self.getParameterByName(self.ENABLED).getWidget()
+            if enabledWidget:
+                enabledWidget.setVisible(self.real)
+                self.toggleBackgroundVisible()
+                if self.useMonitors:
+                    monitorWidget = self.getParameterByName(self.MONITOR).getWidget()
+                    if monitorWidget:
+                        monitorWidget.setVisible(self.real)
+                if not self.channelParent.loading:
+                    self.pluginManager.DeviceManager.globalUpdate(inout=self.inout)
 
     def enabledChanged(self) -> None:
         """Extend as needed. Already linked to enabled checkbox."""
@@ -2936,7 +3222,7 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             if monitorWidget:
                 monitorWidget.setStyleSheet(self.warningStyleSheet if warn else self.defaultStyleSheet)
 
-    def initGUI(self, item: dict) -> None:  # noqa: C901
+    def initGUI(self, item: dict) -> None:  # noqa: C901, PLR0912
         """Initialize Channel GUI.
 
         Call after corresponding QTreeWidgetItem has been added to tree.
@@ -2951,7 +3237,9 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         # remove / in names. this is valid in all other fields unless explicitly removed
         # ! needs to be removed before value is loaded from file!
         if name_parameter.parameterType == PARAMETERTYPE.TEXT:
-            cast('LineEdit', name_parameter.getWidget()).valid_chars = cast('LineEdit', name_parameter.getWidget()).valid_chars.replace('/', '')
+            lineEdit = cast('LineEdit', name_parameter.getWidget())
+            for invalid_char in self.invalid_chars:
+                lineEdit.valid_chars = lineEdit.valid_chars.replace(invalid_char, '')
         for name, default in self.getSortedDefaultChannel().items():
             # add default value if not found in file. Will be saved to file later.
             if name in item and name not in self.tempParameters() and default[Parameter.RESTORE]:
@@ -2962,6 +3250,8 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
                     # len(item) < 2 -> only provided name -> generating default file
                     self.print(f'Added missing parameter {name} to channel {item[self.NAME]} using default value {default[self.VALUE]}.')
                     self.channelParent.channelsChanged = True
+        if name_parameter.parameterType == PARAMETERTYPE.TEXT:
+            name_parameter.line.allowEmptyText = False  # names cannot be empty
         if self.inout != INOUT.NONE and self.EQUATION in self.displayedParameters:
             line = self.getParameterByName(self.EQUATION).line
             line.setMinimumWidth(200)
@@ -2978,6 +3268,10 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             select.widget.setMinimumWidth(5)
             select.widget.setCheckable(True)
             select.value = initialValue
+        if self.DISPLAY in self.displayedParameters:
+            display = self.getParameterByName(self.DISPLAY)
+            for parameter in self.getRecordedParameters():
+                display.extraContextActions.append(ContextAction(text=f'Toggle display of {parameter.name}', event=parameter.updateDisplay))
         if self.COLLAPSE in self.displayedParameters:
             collapse = self.getParameterByName(self.COLLAPSE)
             initialValue = collapse.value or False
@@ -3032,11 +3326,10 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
         :type pos: QPoint
         """
         settingsContextMenu = QMenu(self.tree)
-        addChannelToConsoleAction = None
-        addParameterToConsoleAction = None
-        if getDebugMode():
-            addChannelToConsoleAction = settingsContextMenu.addAction(self.ADDCHANTOCONSOLE)
-            addParameterToConsoleAction = settingsContextMenu.addAction(self.ADDPARTOCONSOLE)
+        for contextAction in parameter.extraContextActions:
+            contextAction.action = settingsContextMenu.addAction(contextAction.text)
+        addChannelToConsoleAction = settingsContextMenu.addAction(self.ADDCHANTOCONSOLE)
+        addParameterToConsoleAction = settingsContextMenu.addAction(self.ADDPARTOCONSOLE)
         # if parameter.parameterType in [PARAMETERTYPE.COMBO, PARAMETERTYPE.INTCOMBO, PARAMETERTYPE.FLOATCOMBO]:
         #     NOTE channels do only save current value but not the items -> thus editing items is currently not supported
         if not settingsContextMenu.actions():
@@ -3046,9 +3339,14 @@ class Channel(QTreeWidgetItem):  # noqa: PLR0904
             if settingsContextMenuAction is addChannelToConsoleAction:
                 self.pluginManager.Console.addToNamespace('channel', parameter.parameterParent)
                 self.pluginManager.Console.execute(command='channel')
-            if settingsContextMenuAction is addParameterToConsoleAction:
+            elif settingsContextMenuAction is addParameterToConsoleAction:
                 self.pluginManager.Console.addToNamespace('parameter', parameter)
                 self.pluginManager.Console.execute(command='parameter')
+            else:
+                for contextAction in parameter.extraContextActions:
+                    if settingsContextMenuAction is contextAction.action:
+                        contextAction.event()
+                        break
 
 
 class ScanChannel(RelayChannel, Channel):
@@ -3141,40 +3439,60 @@ class ScanChannel(RelayChannel, Channel):
         if self.scan.useDisplayParameter:
             self.display = True
 
-    def connectSource(self, giveFeedback: bool = False) -> None:
+    def connectSource(self, giveFeedback: bool = False) -> None:  # noqa: C901, PLR0912, PLR0915
         """Connect the sourceChannel.
 
         :param giveFeedback: Report on success of connection, defaults to False
         :type giveFeedback: bool, optional
         """
-        self.sourceChannel = self.scan.pluginManager.DeviceManager.getChannelByName(self.name, inout=INOUT.OUT)
+        channel_name = self.name
+        parameter_name = ''
+        if '.' in self.name:
+            channel_name = self.name.split('.')[0]
+            parameter_name = self.name.split('.')[1]  # if this is defined, Scan will not connect to the value but to the specified parameter of the sourceChannel
+        self.sourceChannel = self.scan.pluginManager.DeviceManager.getChannelByName(channel_name, inout=INOUT.OUT)
         if not self.sourceChannel:
-            self.sourceChannel = self.scan.pluginManager.DeviceManager.getChannelByName(self.name, inout=INOUT.IN)
+            self.sourceChannel = self.scan.pluginManager.DeviceManager.getChannelByName(channel_name, inout=INOUT.IN)
         # if self.unit != '' and self.sourceChannel and self.unit != self.sourceChannel.unit:
         #     Found a channel that has the same name but likely belongs to another device.
         #     In most cases the only consequence is using the wrong color.
         #     Handle in specific scan if other channel specific properties are relevant
+        if self.sourceChannel:
+            self.sourceParameter = self.sourceChannel.getParameterByName(parameter_name) if parameter_name else None
+            if self.sourceParameter and self.sourceParameter.parameterType not in {PARAMETERTYPE.INT, PARAMETERTYPE.FLOAT, PARAMETERTYPE.EXP}:
+                self.print(f'Cannot link to parameter {parameter_name} on channel {channel_name} as only parameters of type INT, FLOAT, and EXP are supported for linking.')
+                self.sourceParameter = None  # Do not link
+                self.sourceChannel = None  # Do not link
         devicePushButton = cast('QPushButton', self.getParameterByName(self.DEVICE).getWidget())
         if self.sourceChannel:
-            self.initialValue = self.sourceChannel.value
-            self.updateValueSignal = self.sourceChannel.signalComm.updateValueSignal
-            devicePushButton.setIcon(self.sourceChannel.getDevice().getIcon(desaturate=(not self.sourceChannel.acquiring and not self.sourceChannel.getDevice().recording)))
-            devicePushButton.setToolTip(f'Source: {self.sourceChannel.getDevice().name}')
-            if self.sourceChannel.useMonitors and self.sourceChannel.real:
-                self.getParameterByName(self.VALUE).parameterType = self.sourceChannel.getParameterByName(self.MONITOR).parameterType
-                self.getParameterByName(self.VALUE).applyWidget()
+            self.initialValue = self.sourceParameter.value if self.sourceParameter else self.sourceChannel.value
+            self.updateValueSignal = self.sourceParameter.signalComm.updateValueSignal if self.sourceParameter else self.sourceChannel.signalComm.updateValueSignal
+            devicePushButton.setIcon(self.sourceChannel.getIcon(desaturate=(not self.sourceChannel.acquiring and not self.sourceChannel.getDevice().recording)))
+            full_source = (f'Source: {self.sourceChannel.getDevice().name}.{self.sourceChannel.name}.{parameter_name}' if self.sourceParameter else
+                           f'Source: {self.sourceChannel.getDevice().name}.{self.sourceChannel.name}')
+            devicePushButton.setToolTip(f'Source: {full_source}')
+            value = self.getParameterByName(self.VALUE)
+            if self.sourceParameter:
+                value.parameterType = self.sourceParameter.parameterType
+                value.applyWidget()
+                self.value = cast('float | None', self.sourceParameter.value)
+                self.sourceParameter.extraEvents.append(self.relayValueEvent)
+                self.unit = self.sourceParameter.unit
+            elif self.sourceChannel.useMonitors and self.sourceChannel.real:
+                value.parameterType = self.sourceChannel.getParameterByName(self.MONITOR).parameterType
+                value.applyWidget()
                 self.value = self.sourceChannel.monitor
                 self.sourceChannel.getParameterByName(self.MONITOR).extraEvents.append(self.relayValueEvent)
             else:
-                self.getParameterByName(self.VALUE).parameterType = self.sourceChannel.getParameterByName(self.VALUE).parameterType
-                self.getParameterByName(self.VALUE).applyWidget()
+                value.parameterType = self.sourceChannel.getParameterByName(self.VALUE).parameterType
+                value.applyWidget()
                 self.value = self.sourceChannel.value
                 self.sourceChannel.getParameterByName(self.VALUE).extraEvents.append(self.relayValueEvent)
             if not self.unit:  # do not overwrite unit if set explicitly
                 self.unit = self.sourceChannel.unit
             self.notes = f'Source: {self.sourceChannel.getDevice().name}.{self.sourceChannel.name}'
         else:
-            self.initialValue = None
+            self.initialValue = np.nan
             self.updateValueSignal = None
             devicePushButton.setIcon(self.scan.makeCoreIcon('help_large_dark.png' if getDarkMode() else 'help_large.png'))
             devicePushButton.setToolTip('Source: Unknown')
@@ -3194,7 +3512,9 @@ class ScanChannel(RelayChannel, Channel):
             # Note self.value should only be used as a display. it should show the background corrected value if applicable
             # the uncorrected value should be accessed using self.sourceChannel.value or self.getValues
             try:
-                if self.sourceChannel.useMonitors and self.sourceChannel.real:
+                if self.sourceParameter:
+                    self.value = cast('float | None', self.sourceParameter.value)
+                elif self.sourceChannel.useMonitors and self.sourceChannel.real:
                     self.value = self.sourceChannel.monitor
                 else:
                     device = self.sourceChannel.getDevice()
@@ -3207,6 +3527,8 @@ class ScanChannel(RelayChannel, Channel):
     def removeEvents(self) -> None:
         """Remove extra events from sourceChannel."""
         if self.sourceChannel:
+            if self.sourceParameter and self.relayValueEvent in self.sourceParameter.extraEvents:
+                self.sourceParameter.extraEvents.remove(self.relayValueEvent)
             if self.sourceChannel.useMonitors and self.sourceChannel.real:
                 if self.relayValueEvent in self.sourceChannel.getParameterByName(self.MONITOR).extraEvents:
                     self.sourceChannel.getParameterByName(self.MONITOR).extraEvents.remove(self.relayValueEvent)
@@ -3591,10 +3913,10 @@ class ControlCursor(Cursor):
         self.setPosition(*self.getPosition())
 
 
-class RestoreFloatComboBox(QComboBox):
+class RestoreNumberComboBox(QComboBox):
     """ComboBox that allows to restore its value upon restart using an internal :class:`~esibd.core.Setting`."""
 
-    def __init__(self, parentPlugin: 'Plugin', default: str, items: str, attr: str, **kwargs) -> None:
+    def __init__(self, parentPlugin: 'Plugin', default: str, items: str, attr: str, use_float: bool = True, **kwargs) -> None:
         """Initialize a RestoreFloatComboBox.
 
         :param parentPlugin: Parent plugin.
@@ -3612,10 +3934,27 @@ class RestoreFloatComboBox(QComboBox):
         self.attr = attr
         self.fullName = f'{self.parentPlugin.name}/{self.attr}'
         self.parentPlugin.pluginManager.Settings.loading = True
-        self.setting = Setting(parameterParent=self.parentPlugin.pluginManager.Settings, name=self.fullName, parameterType=PARAMETERTYPE.FLOATCOMBO,
+        self.setting = Setting(parameterParent=self.parentPlugin.pluginManager.Settings, name=self.fullName,
+                                parameterType=PARAMETERTYPE.FLOATCOMBO if use_float else PARAMETERTYPE.INTCOMBO,
                                value=qSet.value(self.fullName, default), default=default,
                                 items=items, widget=self, internal=True, **kwargs)
         self.parentPlugin.pluginManager.Settings.loading = False
+
+
+class RestoreIntComboBox(RestoreNumberComboBox):
+    """ComboBox that allows to restore its value upon restart using an internal :class:`~esibd.core.Setting`."""
+
+    def __init__(self, **kwargs) -> None:
+        """Specify use of int."""
+        super().__init__(**kwargs, use_float=False)
+
+
+class RestoreFloatComboBox(RestoreNumberComboBox):
+    """ComboBox that allows to restore its value upon restart using an internal :class:`~esibd.core.Setting`."""
+
+    def __init__(self, **kwargs) -> None:
+        """Specify use of float."""
+        super().__init__(**kwargs, use_float=True)
 
 
 class Label(QLabel, ParameterWidget):
@@ -3710,6 +4049,15 @@ class Icon(QIcon):
         else:
             super().__init__(pixmap)
         self.fileName = file  # remember for later access
+
+
+@dataclass
+class ContextAction:
+    """An action that can be added to a context menu."""
+
+    text: str
+    event: Callable
+    action: 'QAction | None' = None
 
 
 class Action(QAction):
@@ -4175,7 +4523,7 @@ class TreeWidget(QTreeWidget):
 
         :param limit: Limit the number of items considered, defaults to 0
         :type limit: int, optional
-        :return: _description_
+        :return: Total height of all considered items.
         :rtype: int
         """
         header = self.header()
@@ -4329,6 +4677,9 @@ class LineEdit(QLineEdit, ParameterWidget):
 
     # based on https://stackoverflow.com/questions/79309361/prevent-editingfinished-signal-from-qlineedit-after-programmatic-text-update
     userEditingFinished = pyqtSignal()
+    allowEmptyText: bool = True
+    """If False, empty text is not allowed and will be replaced with last valid text"""
+    last_valid_text: str
 
     def __init__(self, parentParameter: Parameter, tree: 'QTreeWidget | None' = None) -> None:
         """Initialize a LineEdit."""
@@ -4336,7 +4687,7 @@ class LineEdit(QLineEdit, ParameterWidget):
         self._edited = False
         self.parentParameter = parentParameter
         # Regular expression to allow only letters (both upper and lower case), digits, and spaces + mathematical symbols and brackets for equations
-        self.valid_chars = r'^[a-zA-Z0-9\s\-_\(\)\[\]\{\}\.*;:" \'<>^?=\+,~!@#$%&/]*$'
+        self.valid_chars = valid_chars
         # ! remove the forward slash from all parameters like name that may affect data structure in hdf5 files
         # NOTE: \\/ slashes may cause names to be interpreted as paths but are needed in equations -> not allowed, add / to valid_chars only for equations
         self.tree = tree
@@ -4358,21 +4709,25 @@ class LineEdit(QLineEdit, ParameterWidget):
         """
         self.updateGeometry()  # adjust width to text
         self.validateInput()
+        if self.text().strip():
+            self.last_valid_text = self.text()
 
     def validateInput(self) -> None:
         """Validate the text and remove invalid characters."""
         current_text = self.text()
         # Remove any character that doesn't match the valid_chars regex
-        if not re.match(self.valid_chars, current_text):
-            # Filter the text, keeping only valid characters
-            filtered_text = ''.join([char for char in current_text if re.match(self.valid_chars, char)])
-            _ = [self.parentParameter.print(f'Removing invalid character {char} from {current_text}',
-                                             flag=PRINT.WARNING) for char in current_text if not re.match(self.valid_chars, char)]
-            self.setText(filtered_text)  # Update the QLineEdit with valid characters only
+        valid_text = validateText(printParent=self.parentParameter, valid_chars=self.valid_chars, text=current_text).strip()
+        if valid_text != current_text:
+            self.setText(valid_text)
 
     def onEditingFinished(self) -> None:
         """Process new value and update tree if applicable after editing was finished by Enter or loosing focus."""
-        if self._edited:
+        if not self.text().strip() and not self.allowEmptyText:
+            if self.last_valid_text:
+                self.parentParameter.print(f'Empty value not allowed, reverting to {self.last_valid_text}', flag=PRINT.WARNING)
+                self.setText(self.last_valid_text)
+            self._edited = False
+        elif self._edited:
             self._edited = False
             if self.tree:
                 self.tree.scheduleDelayedItemsLayout()
@@ -4556,6 +4911,9 @@ class IconStatusBar(QStatusBar):
         self.icon_warning = Icon(internalMediaPath / 'unicode_warning.png')
         self.icon_error = Icon(internalMediaPath / 'unicode_error.png')
         self.icon_info = Icon(internalMediaPath / 'unicode_info.png')
+        self.icon_debug = Icon(internalMediaPath / 'unicode_bug.png')
+        self.icon_verbose = Icon(internalMediaPath / 'icon_V.png')
+        self.icon_trace = Icon(internalMediaPath / 'icon_T.png')
         self.icon_explorer = Icon(PROGRAM_ICON)
         self.setIcon(self.icon_explorer)
 
@@ -4586,6 +4944,12 @@ class IconStatusBar(QStatusBar):
                 self.setIcon(self.icon_error)
             case PRINT.EXPLORER:
                 self.setIcon(self.icon_explorer)
+            case PRINT.DEBUG:
+                self.setIcon(self.icon_debug)
+            case PRINT.VERBOSE:
+                self.setIcon(self.icon_verbose)
+            case PRINT.TRACE:
+                self.setIcon(self.icon_trace)
             case _:
                 self.setIcon(self.icon_info)
 
@@ -4809,12 +5173,12 @@ class ThemedConsole(pyqtgraph.console.ConsoleWidget):
             sb.setValue(sb.maximum())
 
     def loadHistory(self):  # extend to catch error if file does not exist  # noqa: ANN201, D102
-        h = None
+        history = None
         try:
-            h = super().loadHistory()
+            history = super().loadHistory()
         except EOFError as e:
             print(f'Could not load history: {e}')  # noqa: T201
-        return h
+        return history
 
     def _commandEntered(self, repl, cmd) -> None:  # noqa: ANN001
         """Make sure submitted code will be visible even if filters were active before."""
@@ -5019,6 +5383,7 @@ class ViewBox(pg.ViewBox):
     userMouseEnabledChanged = pyqtSignal(bool, bool)
     axis_leftright: pg.AxisItem
     dummyAx: pg.AxisItem
+    plotItem: 'PlotItem'
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: D107
         super().__init__(*args, **kwargs)
@@ -5036,6 +5401,7 @@ class ViewBox(pg.ViewBox):
 
     def resetDragging(self) -> None:  # noqa: D102  # pylint: disable = missing-function-docstring
         self.dragging = False
+        self.plotItem.parentPlot()
 
     def setMouseEnabled(self, x: 'bool | None' = None, y: 'bool | None' = None) -> None:
         """Call user event if values have changed.
@@ -5074,6 +5440,7 @@ class PlotItem(pg.PlotItem):
     enableAutoRange: Callable  # dynamically created -> needs explicit type hint
     disableAutoRange: Callable  # dynamically created -> needs explicit type hint
     xyLabel: 'LabelItem'
+    testModeLabel: 'LabelItem'
     setRange: Callable
     viewRange: Callable
     setXRange: Callable
@@ -5096,6 +5463,7 @@ class PlotItem(pg.PlotItem):
         """
         if not viewBox:
             viewBox = ViewBox()
+        viewBox.plotItem = self
         super().__init__(viewBox=viewBox, **kwargs)
         self.parentPlugin = parentPlugin
         self.tickWidth = tickWidth
@@ -5112,6 +5480,14 @@ class PlotItem(pg.PlotItem):
             self.xyLabel = LabelItem(anchor=(1, 1))
             self.xyLabel.setParentItem(self.getViewBox())
             self.xyLabel.setColor(colors.fg)
+        if getTestMode():
+            self.testModeLabel = LabelItem(justify='center', size='24pt')
+            self.testModeLabel.setParentItem(self.getViewBox())
+            self.testModeLabel.anchor((0.5, 0.5), (0.5, 0.5))
+            self.testModeLabel.setPos(0, 0)
+            color = QColor(colors.fg)
+            self.testModeLabel.setText(
+                f"<span style='font-size: 18pt; font-weight: bold; color: rgba({color.red},{color.green},{color.blue},120);'>Test Mode Active! Simulating Data!</span>")
 
     def init(self) -> None:
         """Init plotItem formatting and events."""
@@ -5181,7 +5557,7 @@ class PlotItem(pg.PlotItem):
         """
         viewBox = self.getViewBox()
         if self.parentPlugin and viewBox and viewBox.mouseEnabled()[0]:
-            self.parentPlugin.parentPlugin.signalComm.plotSignal.emit()
+            self.parentPlugin.parentPlugin.signalComm.plotSignal.emit(True)  # noqa: FBT003
 
     @property
     def dragging(self) -> bool:  # pylint: disable = missing-function-docstring
@@ -5335,11 +5711,12 @@ class TimeoutLock:
             finally:
                 if result and not already_acquired:
                     self._lock.release()
-                if ((self.lockParent.errorCount == self.lockParent.MAX_ERROR_COUNT or self.lockParent.errorCount > 2 * self.lockParent.MAX_ERROR_COUNT) and
+                if ((self.lockParent.errorCount == self.lockParent.maxErrorCount or self.lockParent.errorCount > 2 * self.lockParent.maxErrorCount) and
                     isinstance(self.lockParent, DeviceController)):
-                    # only call closeCommunication when equal to MAX_ERROR_COUNT, Otherwise errors during closeCommunication could cause recursion.
+                    # only call closeCommunication when equal to maxErrorCount, Otherwise errors during closeCommunication could cause recursion.
                     self.print(f'Closing communication of {self.lockParent.name} after more than {self.lockParent.errorCount} consecutive errors.', flag=PRINT.ERROR)  # {e}
-                    self.lockParent.closeCommunication()
+                    if not self.lockParent.closing:  # avoid recursion if lock cannot be acquired while closing
+                        self.lockParent.closeCommunication()
         if not result and timeoutMessage:
             self.print(timeoutMessage, flag=PRINT.ERROR)
 
@@ -5398,9 +5775,11 @@ class DeviceController(QObject):  # noqa: PLR0904
     """Indicates if communications has been initialized successfully and not yet terminated."""
     initializing: bool = False
     """Indicates if communications is being initialized."""
+    closing: bool = False
+    """Indicates if communications is being closed."""
     rng = np.random.default_rng()
     """Random number generator."""
-    MAX_ERROR_COUNT = 25
+    maxErrorCount: int
     """Close communication if exceeded."""
 
     def __init__(self, controllerParent: 'Device | Channel') -> None:
@@ -5415,6 +5794,7 @@ class DeviceController(QObject):  # noqa: PLR0904
         self.values: np.ndarray = None  # type: ignore # ignore on purpose  | None  # noqa: PGH003
         self.controllerParent = controllerParent
         self.pluginManager = controllerParent.pluginManager
+        self.maxErrorCount = self.getDevice().maxErrorCount
         self.lock = TimeoutLock(lockParent=self)  # init here so each instance gets its own lock
         self.port = None
         self.signalComm = self.SignalCommunicate()
@@ -5425,7 +5805,6 @@ class DeviceController(QObject):  # noqa: PLR0904
         self.errorCountTimer = QTimer()
         self.errorCountTimer.timeout.connect(self.resetErrorCount)
         self.errorCountTimer.setSingleShot(True)
-        self.errorCountTimer.setInterval(600000)  # 10 min i.e. 600000 msec
 
     @property
     def name(self) -> str:
@@ -5440,21 +5819,21 @@ class DeviceController(QObject):  # noqa: PLR0904
     @errorCount.setter
     def errorCount(self, count: int) -> None:
         if count > self._errorCount and count % 5 == 0:
-            self.print(f'Error count is {count}. Communication will be closed after {self.MAX_ERROR_COUNT} consecutive errors.', flag=PRINT.WARNING)
+            self.print(f'Error count is {count}. Communication will be closed after {self.maxErrorCount} consecutive errors.', flag=PRINT.WARNING)
         self._errorCount = count
         if self.errorCount != 0:
+            self.errorCountTimer.setInterval(self.controllerParent.pluginManager.Settings.errorResetTime * 60000)  # e.g. 10 min = 600000 msec
             QTimer.singleShot(0, self.errorCountTimer.start)  # will reset after interval unless another error happens before and restarts the timer
-        if (self.errorCount == self.MAX_ERROR_COUNT or self.errorCount > 2 * self.MAX_ERROR_COUNT) and self.initialized:
-            self.print(f'Closing communication after more than {self.errorCount} consecutive errors.', flag=PRINT.ERROR)  # {e}
+        if (self.errorCount == self.maxErrorCount or self.errorCount > 2 * self.maxErrorCount) and self.initialized:
+            self.print(f'Closing communication after {self.errorCount} consecutive errors.', flag=PRINT.ERROR)  # {e}
             self.closeCommunication()
-        if isinstance(self.controllerParent, self.pluginManager.Device):
-            QTimer.singleShot(0, self.controllerParent.errorCountChanged)
-        elif isinstance(self.controllerParent, Channel) and isinstance(self.controllerParent.channelParent, self.pluginManager.Device):
-            QTimer.singleShot(0, self.controllerParent.channelParent.errorCountChanged)
+        QTimer.singleShot(0, self.getDevice().errorCountChanged)
 
     def resetErrorCount(self) -> None:
         """Reset error count to 0."""
         self.errorCount = 0
+        if isinstance(self.controllerParent, self.pluginManager.Device):
+            self.controllerParent.errorCount = 0
 
     def print(self, message: str, flag: PRINT = PRINT.MESSAGE) -> None:
         """Send a message to stdout, the statusbar, the Console, and if enabled to the logfile.
@@ -5468,6 +5847,14 @@ class DeviceController(QObject):  # noqa: PLR0904
         """
         controller_name = f'{shorten_text(self.controllerParent.name + " controller", max_length=25):25s}' if isinstance(self.controllerParent, Channel) else 'Controller'
         self.controllerParent.print(f'{controller_name}: {message}', flag=flag)
+
+    def getDevice(self) -> 'Device':
+        """Return the corresponding device, even if controllerParent is a Channel."""
+        if isinstance(self.controllerParent, self.pluginManager.Device):
+            return self.controllerParent
+        if isinstance(self.controllerParent, Channel) and isinstance(self.controllerParent.channelParent, self.pluginManager.Device):
+            return self.controllerParent.channelParent
+        return None  # type: ignore  # noqa: PGH003
 
     def initializeCommunication(self) -> None:
         """Start the :meth:`~esibd.core.DeviceController.initThread`."""
@@ -5532,8 +5919,8 @@ class DeviceController(QObject):  # noqa: PLR0904
         self.initializeValues()
         self.initialized = True
         self.startAcquisition()
-        if isinstance(self.controllerParent, self.pluginManager.Device) and self.controllerParent.isOn():
-            self.controllerParent.updateValues(apply=True)  # apply values before turning on or off
+        if self.getDevice().isOn():
+            self.getDevice().updateValues(apply=True)  # apply values before turning on or off
             self.toggleOnFromThread()
 
     def readNumbers(self) -> None:
@@ -5605,10 +5992,7 @@ class DeviceController(QObject):  # noqa: PLR0904
                     self.fakeNumbers() if getTestMode() else self.readNumbers()
                     self.signalComm.updateValuesSignal.emit()
             # release lock before waiting!
-            if isinstance(self.controllerParent, Channel) and isinstance(self.controllerParent.channelParent, self.pluginManager.Device):
-                time.sleep(self.controllerParent.channelParent.interval / 1000)
-            elif isinstance(self.controllerParent, self.pluginManager.Device):
-                time.sleep(self.controllerParent.interval / 1000)
+            time.sleep(self.getDevice().interval / 1000)
 
     def toggleOnFromThread(self, parallel: bool = True) -> None:
         """Toggles device on or off (tread safe).
@@ -5633,18 +6017,17 @@ class DeviceController(QObject):  # noqa: PLR0904
     def stopAcquisition(self) -> bool:
         """Terminate acquisition but leaves communication initialized."""
         self.print('stopAcquisition', flag=PRINT.DEBUG)
-        if isinstance(self.controllerParent, self.pluginManager.Device) and self.controllerParent.recording:
+        if isinstance(self.controllerParent, self.pluginManager.Device) and self.getDevice().recording:
             # stop recording if controller is stopping acquisition
             # continue if only a channel controller is stopping acquisition
-            self.controllerParent.recording = False
-        elif (isinstance(self.controllerParent, Channel) and isinstance(self.controllerParent.channelParent, self.pluginManager.Device) and
-              self.controllerParent.channelParent.recording and
+            self.getDevice().recording = False
+        elif (isinstance(self.controllerParent, Channel) and self.getDevice().recording and
               # test if controllerParent is the last initialized channel -> it will be stopped, so recording should end.
-                not any(channel.controller.initialized or not channel.active for channel in self.controllerParent.channelParent.channels
+                not any(channel.controller.initialized or not channel.active for channel in self.getDevice().channels
                          if channel.controller and channel is not self.controllerParent)):
             # only stop recording if none of the channel controllers is initialized
-            self.controllerParent.channelParent.print('Stopping recording as last initialized channel is closing Communication.', flag=PRINT.DEBUG)
-            self.controllerParent.channelParent.recording = False
+            self.getDevice().print('Stopping recording as last initialized channel is closing communication.', flag=PRINT.DEBUG)
+            self.getDevice().recording = False
         if self.acquisitionThread:
             with self.lock.acquire_timeout(1, timeoutMessage='Could not acquire lock to stop acquisition.'):
                 # use lock in runAcquisition to make sure acquiring flag is not changed before last call completed
@@ -5652,10 +6035,7 @@ class DeviceController(QObject):  # noqa: PLR0904
                 self.acquiring = False
             self.initializeValues(reset=True)  # set values and monitors to None to indicate that acquisition has stopped and current value is unknown
             self.updateValues()  # update new values in GUI
-            if isinstance(self.controllerParent, self.pluginManager.Device):
-                self.controllerParent.updateValues()
-            elif isinstance(self.controllerParent, Channel) and isinstance(self.controllerParent.channelParent, self.pluginManager.Device):
-                self.controllerParent.channelParent.updateValues()
+            self.getDevice().updateValues()
             return True
         return False
 
@@ -5669,10 +6049,12 @@ class DeviceController(QObject):  # noqa: PLR0904
         2. closing your custom hardware communication
         3. self.initialized = False
         """
+        self.closing = True
         self.print('closeCommunication controller', flag=PRINT.DEBUG)
         if self.acquiring:
             self.stopAcquisition()  # only call if not already called by device
         # self.initialized = False # ! Make sure to call this at the end of extended function  # noqa: ERA001
+        # self.closing = False # ! Make sure to call this at the end of extended function  # noqa: ERA001
 
     def serialWrite(self, port: serial.Serial, message: str, encoding: str = 'utf-8') -> None:
         """Write a string to a serial port. Takes care of decoding messages to bytes and catches common exceptions.
@@ -5997,3 +6379,24 @@ class MouseInterceptor(QObject):
             elif a1.button() == Qt.MouseButton.RightButton:
                 QTimer.singleShot(200, lambda: self.rippleEffectSignal.emit(local_pos.x(), local_pos.y(), QColor(255, 50, 50)))
         return False
+
+
+class TransparentTextDelegate(QtWidgets.QStyledItemDelegate):
+    """Delegate that ensures transparent text stays transparent even if QWidgetItem gets selected."""
+
+    def paint(self, painter, option, index):  # noqa: ANN001, ANN201, D102 # pylint: disable = missing-param-doc, missing-function-docstring
+        # Get the color of the text
+        color = index.data(Qt.ItemDataRole.ForegroundRole)
+        if isinstance(color, QBrush):
+            qcolor = color.color()
+        elif isinstance(color, QColor):
+            qcolor = color
+        else:
+            qcolor = None
+
+        # If text is fully transparent, skip drawing text
+        if qcolor is not None and qcolor.alpha() == 0:
+            # ignore paint event so transparent text used for sorting does not become visible
+            pass
+        else:
+            super().paint(painter, option, index)

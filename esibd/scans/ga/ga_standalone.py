@@ -49,7 +49,7 @@ class GA():
 
     def select_parent(self):
         parent=0
-        if np.random.rand() < 0:  # tournament selection (best of 3 random picked)
+        if np.random.rand() < 0.5:  # tournament selection (best of 3 random picked)
             r = np.random.randint(self.num_elite)  # get random integer in range [1, num_elite]
             parent=r
             for i in np.arange(2):

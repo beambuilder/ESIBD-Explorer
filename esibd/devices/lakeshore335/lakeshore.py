@@ -1,10 +1,12 @@
 # pylint: disable=[missing-module-docstring] # only single class in module
 # install lakeshore drivers from here if not automatically installed via windows updates: https://www.lakeshore.com/resources/software/drivers
 
+import time
 from typing import cast
 
 import numpy as np
 from lakeshore import Model335
+from lakeshore.generic_instrument import InstrumentException
 
 from esibd.core import (
     PARAMETERTYPE,
@@ -34,7 +36,7 @@ class LS335(Device):
 
     name = 'LS335'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     iconFile = 'LS335.png'
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = 'K'
@@ -54,6 +56,10 @@ class LS335(Device):
         self.unitAction = self.addStateAction(event=self.changeUnit, toolTipFalse='Change to °C', iconFalse=self.makeIcon('tempC_dark.png'),
                                                toolTipTrue='Change to K', iconTrue=self.makeIcon('tempK_dark.png'), attr='displayC')
 
+    def afterFinalizeInit(self) -> None:
+        super().afterFinalizeInit()
+        self.onAction.setVisible(False)
+
     def getChannels(self) -> 'list[TemperatureChannel]':
         return cast('list[TemperatureChannel]', super().getChannels())
 
@@ -63,6 +69,7 @@ class LS335(Device):
 
     def changeUnit(self) -> None:
         """Update plots to account for change of unit."""
+        self.pluginManager.connectAllSources()
         if self.liveDisplayActive():
             self.clearPlot()
             self.liveDisplay.plot()
@@ -82,7 +89,7 @@ class LS335(Device):
     def convertDataDisplay(self, data: np.ndarray) -> np.ndarray:
         return data - 273.15 if self.unitAction.state else data
 
-    def getUnit(self) -> str:
+    def getDisplayUnit(self) -> str:
         return '°C' if self.unitAction.state else self.unit
 
     def updateTheme(self) -> None:
@@ -116,6 +123,9 @@ class TemperatureChannel(Channel):
         channel = super().getDefaultChannel()
         channel.pop(Channel.EQUATION)
         channel[self.VALUE][Parameter.HEADER] = 'Set Temp (K)'  # overwrite existing parameter to change header
+        channel[self.VALUE][Parameter.UNIT] = 'K'
+        channel[self.MONITOR][Parameter.HEADER] = 'Monitor (K)'  # overwrite existing parameter to change header
+        channel[self.MONITOR][Parameter.UNIT] = 'K'
         channel[self.VALUE][Parameter.INSTANTUPDATE] = False
         channel[self.ACTIVE] = parameterDict(value=False, parameterType=PARAMETERTYPE.BOOL, attr='channel_active', toolTip='Activate PID control.',
                                               event=self.channel_active_changed)
@@ -180,8 +190,9 @@ class TemperatureController(DeviceController):
     def runInitialization(self) -> None:
         try:
             self.ls335 = Model335(baud_rate=57600, com_port=self.controllerParent.COM)  # may raise AttributeError that can not be excepted
+            time.sleep(500)  # TODO test if initialization gets more stable with this delay
             self.signalComm.initCompleteSignal.emit()
-        except (AttributeError, Exception) as e:  # pylint: disable=[broad-except]
+        except (AttributeError, Exception) as e:  # pylint: disable=[broad-except]  # noqa: BLE001
             self.print(f'Error while initializing: {e}', flag=PRINT.ERROR)
         finally:
             self.initializing = False
@@ -200,13 +211,16 @@ class TemperatureController(DeviceController):
         for channel in self.controllerParent.channels:
             if channel.real:
                 # update pid values from hardware to make sure the displayed value is meaningful
-                heater_pid = self.ls335.get_heater_pid(channel.heater) if self.ls335 and not getTestMode() else {'gain': -1, 'integral': -1, 'ramp_rate': -1}
-                Kp = channel.getParameterByName(channel.KP)
-                Kp.setValueWithoutEvents(heater_pid['gain'])
-                Ki = channel.getParameterByName(channel.KI)
-                Ki.setValueWithoutEvents(heater_pid['integral'])
-                Kd = channel.getParameterByName(channel.KD)
-                Kd.setValueWithoutEvents(heater_pid['ramp_rate'])
+                try:
+                    heater_pid = self.ls335.get_heater_pid(channel.heater) if self.ls335 and not getTestMode() else {'gain': -1, 'integral': -1, 'ramp_rate': -1}
+                    Kp = channel.getParameterByName(channel.KP)
+                    Kp.setValueWithoutEvents(heater_pid['gain'])
+                    Ki = channel.getParameterByName(channel.KI)
+                    Ki.setValueWithoutEvents(heater_pid['integral'])
+                    Kd = channel.getParameterByName(channel.KD)
+                    Kd.setValueWithoutEvents(heater_pid['ramp_rate'])
+                except InstrumentException as e:
+                    self.print(f'Error while initializing channel {channel.name}: {e}\nTry to restart.', flag=PRINT.ERROR)
         super().initComplete()
 
     def readNumbers(self) -> None:
@@ -272,7 +286,9 @@ class TemperatureController(DeviceController):
     def closeCommunication(self) -> None:
         super().closeCommunication()
         if self.ls335:
-            with self.lock.acquire_timeout(1, timeoutMessage='Could not acquire lock before closing port.'):
-                self.ls335.disconnect_usb()
-                self.ls335 = None
+            if self.ls335.device_serial:
+                with self.lock.acquire_timeout(1, timeoutMessage='Could not acquire lock before closing port.'):
+                    self.ls335.disconnect_usb()
+            self.ls335 = None
         self.initialized = False
+        self.closing = False

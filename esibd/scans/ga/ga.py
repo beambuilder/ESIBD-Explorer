@@ -10,13 +10,15 @@ from esibd.plugins import Scan
 if TYPE_CHECKING:
     from esibd.plugins import Plugin
 
+    from .ga_standalone import GA
+
 
 def providePlugins() -> 'list[type[Plugin]]':
     """Return list of provided plugins. Indicates that this module provides plugins."""
-    return [GA]
+    return [GAScan]
 
 
-class GA(Scan):
+class GAScan(Scan):
     r"""Allows to integrate an independently developed genetic algorithm (GA) for automated optimization of signals\ :cite:`esser_cryogenic_2019`.
 
     Multiple input channels can be selected to be included in the optimization. Make sure to choose safe
@@ -38,7 +40,8 @@ class GA(Scan):
     selected output channel. The output channel can be virtual and contain an
     equation that references many other channels. At the end of the optimization the changed
     parameters will be shown in the plugin. The initial parameters can
-    always be restored in case the optimization fails."""
+    always be restored in case the optimization fails.
+    """
 
     name = 'GA'
     version = '1.0'
@@ -47,9 +50,10 @@ class GA(Scan):
     useInvalidWhileWaiting = True
 
     signalComm: 'SignalCommunicate'
-    display: 'GA.Display'
-    inputChannels: list['GA.MetaChannel']
-    outputChannels: list['GA.ScanChannel | GA.MetaChannel']
+    display: 'GAScan.Display'
+    inputChannels: list['GAScan.MetaChannel']
+    outputChannels: list['GAScan.ScanChannel | GAScan.MetaChannel']
+    ga: 'GA'
 
     class SignalCommunicate(Scan.SignalCommunicate):
         """Bundle pyqtSignals."""
@@ -66,7 +70,7 @@ class GA(Scan):
     class Display(Scan.Display):
         """Display for GA scan."""
 
-        scan: 'GA'
+        scan: 'GAScan'
 
         def initFig(self) -> None:
             super().initFig()
@@ -224,7 +228,7 @@ fig.show()
                             outputChannel.signalComm.waitUntilStableSignal.emit(self.wait)
                 time.sleep((self.wait + self.average) / 1000)
                 self.bufferLagging()
-                self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.')
+                self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.', timeout=10)
                 self.ga.fitness(np.mean(outputChannelValues))
                 if self.log:
                     self.print(self.ga.step_string().replace('GA: ', ''))

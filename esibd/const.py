@@ -1,6 +1,9 @@
 """Defines constants used throughout the package."""
 
+import colorsys
 import importlib.util
+import math
+import re
 import subprocess  # noqa: S404
 import sys
 import traceback
@@ -21,7 +24,7 @@ from esibd.config import *  # pylint: disable = wildcard-import, unused-wildcard
 if TYPE_CHECKING:
     from types import ModuleType
 
-    from esibd.core import Channel
+    from esibd.core import Channel, Parameter
     from esibd.plugins import Plugin, SettingsManager
 
 ParameterType = Union[str, Path, int, float, QColor, bool]  # str | Path | int | float | QColor | bool not compatible with sphinx # noqa: UP007
@@ -43,6 +46,10 @@ DARKMODE = 'Dark mode'
 CLIPBOARDTHEME = 'Clipboard theme'
 DPI = 'DPI'
 TESTMODE = 'Test mode'
+MAXLAGTOLERANCE = 'Max lag tolerance'
+LAGWAITTIME = 'Lag wait time'
+ERRORRESETTIME = 'Error reset time'
+WAKEMODE = 'Wake mode'
 ICONMODE = 'Icon mode'
 GEOMETRY = 'GEOMETRY'
 SETTINGSWIDTH = 'SettingsWidth'
@@ -64,9 +71,12 @@ FILE_INI = '.ini'
 FILE_H5 = '.h5'
 FILE_PDF = '.pdf'
 FILE_PY = '.py'
+FILE_LOG = '.log'
 
 # other
 UTF8 = 'utf-8'
+ANSI = 'ANSI'
+valid_chars = r'^[a-zA-Z0-9\s\-_\(\)\[\]\{\}\.*;:" \'<>^?=\+,~!@#$%&/]*$'
 
 qSet = QSettings(COMPANY_NAME, PROGRAM_NAME)
 
@@ -129,6 +139,21 @@ class Colors:
 colors = Colors()
 
 
+def hex_to_rgb(hex_color: str) -> tuple[float, float, float]:
+    """Convert a hex color to rgb.
+
+    :param hex_color: hex color string
+    :type hex_color: str
+    :return: converted rbg color
+    :rtype: tuple[float, float, float]
+    """
+    hex_color = hex_color.lstrip('#')
+    r = int(hex_color[0:2], 16) / 255.0
+    g = int(hex_color[2:4], 16) / 255.0
+    b = int(hex_color[4:6], 16) / 255.0
+    return r, g, b
+
+
 def rgb_to_hex(rgba: tuple[float, float, float, float]) -> str:
     """Convert colors from rgb to hex.
 
@@ -153,6 +178,61 @@ def mix_hex_colors(color1: str, color2: str, ratio: float) -> str:
 
     mixed = [round(c1[i] * (1 - ratio) + c2[i] * ratio) for i in range(3)]
     return f'#{mixed[0]:02X}{mixed[1]:02X}{mixed[2]:02X}'
+
+
+def color_distance(c1: tuple[float, float, float], c2: tuple[float, float, float]) -> float:
+    """Measure color distance.
+
+    :param c1: first color
+    :type c1: rgb tuple[float, float, float]
+    :param c2: second color
+    :type c2: rgb tuple[float, float, float]
+    :return: color distance
+    :rtype: float
+    """
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2, strict=True)))
+
+
+def similar_but_distinct_color(color_hex: str, index: int) -> str:
+    """Return a similar but distinct color.
+
+    This is used for related plots.
+    The color should be close enough so it is clear that the plots are related,
+    but distinct enough that they can be identified in the plot legend.
+
+    :param color_hex: initial hex color.
+    :type color_hex: str
+    :param index: increase index if you need additional colors.
+    :type index: int
+    :return: similar but distinct hex color.
+    :rtype: str
+    """
+    min_dist: float = 0.20
+    max_dist: float = 0.90
+    base_rgb = hex_to_rgb(color_hex)
+    h, s, v = colorsys.rgb_to_hsv(*base_rgb)
+
+    candidates = []
+    # Sweep nearby hues and small sat/value changes
+    for dh in [-0.14, -0.10, -0.06, -0.03, 0.03, 0.06, 0.10, 0.14]:
+        for ds in [-0.08, 0.00, 0.08]:
+            for dv in [-0.08, 0.00, 0.08]:
+                nh = (h + dh) % 1.0
+                ns = min(1.0, max(0.25, s + ds))
+                nv = min(1.0, max(0.25, v + dv))
+                rgb = colorsys.hsv_to_rgb(nh, ns, nv)
+                candidates.append(rgb)
+    candidates.sort(key=lambda color: color_distance(color, base_rgb))
+    selected = []
+    for candidate in candidates:
+        if color_distance(candidate, base_rgb) < min_dist:
+            continue
+        if all(color_distance(candidate, prev) >= min_dist and color_distance(candidate, prev) <= max_dist for prev in selected):
+            selected.append(candidate)
+        if len(selected) >= index:
+            break
+
+    return rgb_to_hex(selected[-1])
 
 
 class INOUT(Enum):
@@ -432,6 +512,15 @@ def getTestMode() -> bool:
     return qSet.value(f'{GENERAL}/{TESTMODE}', defaultValue=False, type=bool)
 
 
+def getWakeMode() -> bool:
+    """Get the wake mode from :ref:`sec:settings`.
+
+    :return: Wake mode
+    :rtype: bool
+    """
+    return qSet.value(f'{GENERAL}/{WAKEMODE}', defaultValue=False, type=bool)
+
+
 def infoDict(name: str) -> dict[str, str]:
     """Return a dictionary with general information, usually used to add this information to exported files.
 
@@ -468,6 +557,28 @@ def validatePath(path: 'Path | str | None', default: Path) -> 'tuple[Path, bool]
     return path, False
 
 
+def validateText(printParent: 'Plugin | Parameter', valid_chars: str, text: str) -> str:
+    """Validate the text and remove invalid characters.
+
+    :param printParent: A parent that provides access to the internal print function.
+    :type printParent: Plugin | Parameter
+    :param valid_chars: A regular expression containing valid characters
+    :type valid_chars: str
+    :param text: The text to be validated.
+    :type text: str
+    :return: validated text
+    :rtype: str
+    """
+    # Remove any character that doesn't match the valid_chars regex
+    if not re.match(valid_chars, text):
+        # Filter the text, keeping only valid characters
+        valid_text = ''.join([character for character in text if re.match(valid_chars, character)])
+        _ = [printParent.print(f'Removing invalid character {character} from {text}',
+                                         flag=PRINT.WARNING) for character in text if not re.match(valid_chars, character)]
+        return valid_text
+    return text
+
+
 def smooth(data: np.typing.NDArray[np.float32], smooth: int) -> np.typing.NDArray[np.float32]:
     """Smooth a 1D array while keeping edges meaningful.
 
@@ -483,7 +594,7 @@ def smooth(data: np.typing.NDArray[np.float32], smooth: int) -> np.typing.NDArra
     if len(data) < smooth:
         return data
     smooth = int(np.ceil(smooth / 2.) * 2)  # make even
-    window = signal.windows.boxcar(smooth)
+    window = signal.windows.boxcar(smooth)  # type: ignore  # noqa: PGH003
 
     is_valid = np.isfinite(data).astype(float)
     # Smoothed sum and valid count

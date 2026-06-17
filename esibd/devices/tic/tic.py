@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import serial
 
-from esibd.core import PRINT
-from esibd.devices.omnicontrol.omnicontrol import OMNICONTROL, PressureChannel, PressureController
+from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, parameterDict
+from esibd.plugins import Device
 
 if TYPE_CHECKING:
     from esibd.plugins import Plugin
@@ -17,23 +17,62 @@ def providePlugins() -> 'list[type[Plugin]]':
     return [TIC]
 
 
-class TIC(OMNICONTROL):
-    """Read pressure values form an Edwards TIC.
-
-    This is inheriting many functions from the OMNICONTROL plugin.
-    Thus it exemplifies how to build a new plugin by only changing a few specific lines of code.
-    As an added advantage, all improvements and bug fixes made to the OMNICONTROL plugin will be inherited as well.
-    """
+class TIC(Device):
+    """Read pressure values form an Edwards TIC."""
 
     name = 'TIC'
     iconFile = 'edwards_tic.png'
+    version = '1.0'
+    supportedVersion = '1.0'
+    pluginType = PLUGINTYPE.OUTPUTDEVICE
+    unit = 'mbar'
+    logY = True
+    channels: 'list[PressureChannel]'
+    controller: 'TICPressureController'
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
+        self.channelType = PressureChannel
         self.controller = TICPressureController(controllerParent=self)
 
+    def getChannels(self) -> 'list[PressureChannel]':
+        return cast('list[PressureChannel]', super().getChannels())
 
-class TICPressureController(PressureController):
+    com: str
+
+    def getDefaultSettings(self) -> dict[str, dict]:
+        defaultSettings = super().getDefaultSettings()
+        defaultSettings[f'{self.name}/Interval'][Parameter.VALUE] = 500  # overwrite default value
+        defaultSettings[f'{self.name}/COM'] = parameterDict(value='COM1', toolTip='COM port.', items=','.join([f'COM{x}' for x in range(1, 25)]),
+                                          parameterType=PARAMETERTYPE.COMBO, attr='com')
+        defaultSettings[f'{self.name}/{self.MAXDATAPOINTS}'][Parameter.VALUE] = 1E6  # overwrite default value
+        return defaultSettings
+
+
+class PressureChannel(Channel):
+    """UI for pressure with integrated functionality."""
+
+    ID = 'ID'
+    channelParent: TIC
+
+    def getDefaultChannel(self) -> dict[str, dict]:
+
+        # definitions for type hinting
+        self.id: int
+
+        channel = super().getDefaultChannel()
+        channel[self.VALUE][Parameter.HEADER] = 'P (mbar)'
+        channel[self.VALUE][Parameter.UNIT] = 'mbar'
+        channel[self.ID] = parameterDict(value=1, parameterType=PARAMETERTYPE.INTCOMBO, advanced=True,
+                                        items='0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16', attr='id')
+        return channel
+
+    def setDisplayedParameters(self) -> None:
+        super().setDisplayedParameters()
+        self.displayedParameters.append(self.ID)
+
+
+class TICPressureController(DeviceController):
 
     TICgaugeID = (913, 914, 915, 934, 935, 936)
     controllerParent: TIC
@@ -87,3 +126,23 @@ class TICPressureController(PressureController):
                 # Note: unlike most other devices TIC terminates messages with \r and not \r\n
                 response = self.serialRead(self.port, EOL='\r')  # reads return value
         return response
+
+    def rndPressure(self) -> float:
+        """Return a random pressure."""
+        exp = float(self.rng.integers(-11, 3))
+        significand = 0.9 * self.rng.random() + 0.1
+        return significand * 10**exp
+
+    def fakeNumbers(self) -> None:
+        for i, channel in enumerate(self.controllerParent.getChannels()):
+            if channel.enabled and channel.active and channel.real:
+                self.values[i] = self.rndPressure() if np.isnan(self.values[i]) else self.values[i] * self.rng.uniform(.99, 1.01)  # allow for small fluctuation
+
+    def closeCommunication(self) -> None:
+        super().closeCommunication()
+        if self.port:
+            with self.lock.acquire_timeout(1, timeoutMessage='Could not acquire lock before closing port.'):
+                self.port.close()
+                self.port = None
+        self.initialized = False
+        self.closing = False

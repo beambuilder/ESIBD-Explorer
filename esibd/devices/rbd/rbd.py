@@ -22,17 +22,17 @@ class RBD(Device):
 
     The channels show the accumulated charge over time,
     which is proportional to the number of deposited ions. It can also
-    reveal on which elements ions are lost.
+    reveal on which ion optics ions are lost.
     """
 
     name = 'RBD'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.OUTPUTDEVICE
     unit = 'pA'
     iconFile = 'RBD.png'
     useBackgrounds = True  # record backgrounds for data correction
-    channels: 'list[CurrentChannel]'
+    channels: 'list[RBDCurrentChannel]'
 
     class StaticDisplay(StaticDisplay):
         """A display for device data from files."""
@@ -89,7 +89,7 @@ class RBD(Device):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.channelType = CurrentChannel
+        self.channelType = RBDCurrentChannel
 
     def initGUI(self) -> None:
         super().initGUI()
@@ -106,12 +106,12 @@ class RBD(Device):
             channel.resetCharge()
 
 
-class CurrentChannel(Channel):
+class RBDCurrentChannel(Channel):
     """UI for picoammeter with integrated functionality."""
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.controller = CurrentController(controllerParent=self)
+        self.controller = RBDCurrentController(controllerParent=self)
         self.preciseCharge = 0  # store independent of spin box precision to avoid rounding errors
 
     CHARGE = 'Charge'
@@ -124,7 +124,7 @@ class CurrentChannel(Channel):
     UNSTABLE = 'Unstable'
     ERROR = 'Error'
     channelParent: RBD
-    controller: 'CurrentController'
+    controller: 'RBDCurrentController'
 
     def getDefaultChannel(self) -> dict[str, dict]:
 
@@ -141,7 +141,11 @@ class CurrentChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'I (pA)'
-        channel[self.CHARGE] = parameterDict(value=0, parameterType=PARAMETERTYPE.FLOAT, advanced=False, header='C (pAh)', indicator=True, attr='charge')
+        channel[self.VALUE][Parameter.UNIT] = 'pA'
+        channel[self.BACKGROUND][Parameter.HEADER] = 'BG (pA)'
+        channel[self.BACKGROUND][Parameter.UNIT] = 'pA'
+        channel[self.CHARGE] = parameterDict(value=0, parameterType=PARAMETERTYPE.FLOAT, advanced=False, header='C (pAh)', indicator=True,
+                                             attr='charge', unit='pAh')
         channel[self.COM] = parameterDict(value='COM1', parameterType=PARAMETERTYPE.COMBO, advanced=True, toolTip='COM port',
                                         items=','.join([f'COM{x}' for x in range(1, 25)]), header='COM', attr='com')
         channel[self.DEVICENAME] = parameterDict(value='smurf', parameterType=PARAMETERTYPE.LABEL, advanced=True, attr='devicename')
@@ -154,10 +158,10 @@ class CurrentChannel(Channel):
         channel[self.BIAS] = parameterDict(value=False, parameterType=PARAMETERTYPE.BOOL, advanced=True,
                                         toolTip='Apply internal bias.', attr='bias', event=self.updateBias)
         channel[self.OUTOFRANGE] = parameterDict(value=False, parameterType=PARAMETERTYPE.BOOL, advanced=False, indicator=True,
-                                        header='OoR', toolTip='Indicates if signal is out of range.', attr='outOfRange')
+                                        header='OoR', toolTip='Indicates if signal is out of range.', attr='outOfRange', restore=False)
         channel[self.UNSTABLE] = parameterDict(value=False, parameterType=PARAMETERTYPE.BOOL, advanced=False, indicator=True,
-                                        header='U', toolTip='Indicates if signal is unstable.', attr='unstable')
-        channel[self.ERROR] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, advanced=False, attr='error', indicator=True)
+                                        header='U', toolTip='Indicates if signal is unstable.', attr='unstable', restore=False)
+        channel[self.ERROR] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, advanced=False, attr='error', indicator=True, restore=False)
         return channel
 
     def setDisplayedParameters(self) -> None:
@@ -239,11 +243,11 @@ class CurrentChannel(Channel):
             self.controller.updateBiasFlag = True
 
 
-class CurrentController(DeviceController):  # noqa: PLR0904
+class RBDCurrentController(DeviceController):  # noqa: PLR0904
 
-    controllerParent: CurrentChannel
+    controllerParent: RBDCurrentChannel
 
-    def __init__(self, controllerParent: CurrentChannel) -> None:
+    def __init__(self, controllerParent: RBDCurrentChannel) -> None:
         self.outOfRange = False
         self.unstable = False
         self.error = ''
@@ -305,11 +309,11 @@ class CurrentController(DeviceController):  # noqa: PLR0904
                 return
             parsed = self.parse_message_for_sample(msg)
             if any(sym in parsed for sym in ['<', '>']):
-                self.setValuesAndUpdate(0, True, False, parsed)  # noqa: FBT003
+                self.setValuesAndUpdate(np.nan, True, False, parsed)  # noqa: FBT003
             elif '*' in parsed:
-                self.setValuesAndUpdate(0, False, True, parsed)  # noqa: FBT003
+                self.setValuesAndUpdate(np.nan, False, True, parsed)  # noqa: FBT003
             elif not parsed:
-                self.setValuesAndUpdate(0, False, False, 'got empty message')  # noqa: FBT003
+                self.setValuesAndUpdate(np.nan, False, False, 'got empty message')  # noqa: FBT003
             else:
                 self.setValuesAndUpdate(self.readingToNum(parsed), False, False, '')  # noqa: FBT003
             if self.port:
@@ -467,6 +471,7 @@ class CurrentController(DeviceController):  # noqa: PLR0904
                 self.port.close()
                 self.port = None
         self.initialized = False
+        self.closing = False
 
     def RBDWrite(self, message) -> None:
         """RBD specific serial write.

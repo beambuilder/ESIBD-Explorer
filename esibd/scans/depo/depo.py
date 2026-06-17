@@ -96,8 +96,8 @@ class Depo(Scan):
             if self.sourceChannel and not hasattr(self.sourceChannel, 'resetCharge'):
                 # found channel with same name but likely from different device
                 super().connectSource()  # running again after changing name -> disconnect
-            if self.unit in {'pA', 'pAh'}:
-                self.getParameterByName(self.DISPLAY).setVisible(False)
+            if self.unit == 'pAh':
+                self.display = False
 
     class Display(Scan.Display):
         """Display for Depo scan."""
@@ -125,7 +125,7 @@ class Depo(Scan):
                 else:
                     self.format = '%.1f'  # Format ticks in normal notation
 
-        def initFig(self) -> None:
+        def initFig(self) -> None:  # noqa: C901
             super().initFig()
             if self.fig:
                 self.fig.set_constrained_layout_pads(h_pad=-4.0)  # type: ignore # reduce space between axes  # noqa: PGH003
@@ -136,7 +136,11 @@ class Depo(Scan):
                     self.axes.append(self.fig.add_subplot(rows, 1, 3 + i, sharex=self.axes[0]))
                     self.axes[2 + i].set_ylabel(unit)
                 for outputChannel in self.scan.outputChannels:
-                    if outputChannel.unit not in {'pA', 'pAh'} and outputChannel.unit in self.scan.getExtraUnits():
+                    if outputChannel.unit == 'pA':
+                        outputChannel.line = self.axes[0].plot([[datetime.now()]], [0], color=outputChannel.color)[0]  # type: ignore  # noqa: PGH003
+                    if outputChannel.unit == 'pAh':
+                        outputChannel.line = self.axes[1].plot([[datetime.now()]], [0], color=outputChannel.color)[0]  # type: ignore  # noqa: PGH003
+                    elif outputChannel.unit in self.scan.getExtraUnits():
                         outputChannel.line = self.axes[2 + self.scan.getExtraUnits().index(outputChannel.unit)].plot(
                             [[datetime.now()]], [0], color=outputChannel.color, label=outputChannel.name)[0]  # type: ignore  # noqa: PGH003
                         if outputChannel.logY:
@@ -150,9 +154,6 @@ class Depo(Scan):
                 self.depoChargeTarget = self.axes[1].axhline(y=float(self.scan.target), color=self.scan.MYGREEN)
                 if len(self.scan.outputChannels) > 0:
                     selected_output = self.scan.outputChannels[self.scan.getOutputIndex()]
-                    # need to be initialized with datetime on x axis
-                    self.currentLine = self.axes[0].plot([[datetime.now()]], [0], color=selected_output.color)[0]  # type: ignore  # noqa: PGH003
-                    self.chargeLine = self.axes[1].plot([[datetime.now()]], [0], color=selected_output.color)[0]  # type: ignore  # noqa: PGH003
                     self.chargePredictionLine = self.axes[1].plot([[datetime.now()]], [0], '--', color=selected_output.color)[0]  # type: ignore  # noqa: PGH003
                 for i in range(len(self.axes) - 1):
                     self.axes[i].tick_params(axis='x', which='both', bottom=False, labelbottom=False)
@@ -213,7 +214,6 @@ class Depo(Scan):
     warnLevel: int
     warn: bool
     autoscale: bool
-    dialog: bool
 
     def getDefaultSettings(self) -> dict[str, dict]:
         defaultSettings = super().getDefaultSettings()
@@ -235,7 +235,6 @@ class Depo(Scan):
                                                             parameterType=PARAMETERTYPE.BOOL, attr='warn')
         defaultSettings['Autoscale'] = parameterDict(value=True, toolTip='Disable y axis autoscale if your data includes outliers, e.g. from pickup spikes.',
                                                             parameterType=PARAMETERTYPE.BOOL, attr='autoscale')
-        defaultSettings['Dialog'] = parameterDict(value=True, toolTip='Show check list dialog on start.', parameterType=PARAMETERTYPE.BOOL, attr='dialog')
         return defaultSettings
 
     def updateDepoTarget(self) -> None:
@@ -310,19 +309,26 @@ class Depo(Scan):
             if time_axis is not None:
                 time_stamp_axis = [datetime.fromtimestamp(float(t)) for t in time_axis]  # convert timestamp to datetime
                 charge = []
-                for i, output in enumerate(self.outputChannels):
-                    outputRecordingData = output.getRecordingData()
+                for i, outputChannel in enumerate(self.outputChannels):
+                    outputRecordingData = outputChannel.getRecordingData()
                     if outputRecordingData is not None:
-                        if i == self.getOutputIndex():
-                            self.display.currentLine.set_data(time_stamp_axis, outputRecordingData)  # type: ignore  # noqa: PGH003
-                        elif i == self.getOutputIndex() + 1:
-                            charge = outputRecordingData
-                            self.display.chargeLine.set_data(time_stamp_axis, outputRecordingData)  # type: ignore  # noqa: PGH003
-                        elif output.unit not in {'pA', 'pAh'} and output.display:  # only show current and charge for selected channel
-                            if hasattr(output, 'line'):
-                                output.line.set_data(time_stamp_axis, outputRecordingData)  # type: ignore  # noqa: PGH003
+                        if outputChannel.unit == 'pA':
+                            if outputChannel.display or i == self.getOutputIndex():
+                                outputChannel.line.set_data(time_stamp_axis, outputRecordingData)  # type: ignore  # noqa: PGH003
                             else:
-                                self.print(f'Line not initialized for channel {output.name}', flag=PRINT.WARNING)
+                                outputChannel.line.set_data([], [])
+                        elif outputChannel.unit == 'pAh':
+                            if outputChannel.display or i == self.getOutputIndex() + 1:
+                                outputChannel.line.set_data(time_stamp_axis, outputRecordingData)  # type: ignore  # noqa: PGH003
+                            else:
+                                outputChannel.line.set_data([], [])
+                            if i == self.getOutputIndex() + 1:
+                                charge = outputRecordingData
+                        elif outputChannel.unit != 'pAh' and outputChannel.display:  # only show current and charge for selected channel
+                            if hasattr(outputChannel, 'line'):
+                                outputChannel.line.set_data(time_stamp_axis, outputRecordingData)  # type: ignore  # noqa: PGH003
+                            else:
+                                self.print(f'Line not initialized for channel {outputChannel.name}', flag=PRINT.WARNING)
                 time_done_str = 'unknown'
                 end_str = 'end'
                 if len(time_stamp_axis) > self.MIN_FIT_DATA_POINTS or (len(time_stamp_axis) > 0 and done):  # predict scan based on last 10 data points
@@ -343,8 +349,6 @@ class Depo(Scan):
                                             f"{charge[-1] - charge[0]:2.1f} pAh deposited")
         else:  # no data
             self.removeAnnotations(self.display.axes[1])
-            self.display.currentLine.set_data([], [])
-            self.display.chargeLine .set_data([], [])
         self.display.axes[0].autoscale(enable=True, axis='x')
         self.display.axes[0].relim()
         for i in range(len(self.display.axes)):
@@ -439,7 +443,7 @@ fig.show()
         while recording():
             time.sleep(self.interval / 1000)
             self.bufferLagging()
-            self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.')
+            self.waitForCondition(condition=lambda: self.stepProcessed, timeoutMessage='processing scan step.', timeout=10)
             self.inputChannels[0].recordingData.add(time.time())
             for outputChannel in self.outputChannels:
                 if outputChannel.isChargeChannel:

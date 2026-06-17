@@ -1,7 +1,7 @@
 [project]
 name = "esibd-explorer"  # package name can include hyphens, module names should be lower case without hyphens.
 requires-python = ">=3.11"
-version = "0.8.2"
+version = "1.0.1"
 description = "A comprehensive data acquisition and analysis tool for Electrospray Ion-Beam Deposition experiments and beyond."
 license-files = ["LICENSE"]
 readme = "README.rst"
@@ -26,6 +26,7 @@ dependencies = [
 	'picosdk',
 	'opencv-python',
 	'openpyxl',  # ==3.1.2
+	'pyautogui',
 	'PyOpenGL',  # ==3.1.7
 	'pyperclip',  # ==1.8.2
     'pyqt6==6.6',
@@ -58,4 +59,4 @@ packages = ["esibd", "esibd.media", "esibd.devices", "esibd.displays", "esibd.ex
 # You can deactivate that with `include-package-data = false`
 
 [tool.setuptools.package-data]
-esibd = ["devices/**", "displays/**", "examples/**", "scans/**", "media/**", "docs/**"]
+esibd = ["controls/**", "devices/**", "displays/**", "docs/**", "examples/**", "media/**", "scans/**"]

@@ -18,7 +18,7 @@ class MAXIGAUGE(Device):
 
     name = 'MAXIGAUGE'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.OUTPUTDEVICE
     unit = 'mbar'
     iconFile = 'pfeiffer_maxi.png'
@@ -57,6 +57,7 @@ class PressureChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'P (mbar)'
+        channel[self.VALUE][Parameter.UNIT] = 'mbar'
         channel[self.ID] = parameterDict(value=1, parameterType=PARAMETERTYPE.INTCOMBO, advanced=True,
                                         items='0, 1, 2, 3, 4, 5, 6', attr='id')
         return channel
@@ -105,7 +106,7 @@ class PressureController(DeviceController):
                         if status == '0':
                             self.values[i] = float(pressure)  # set unit to mbar on device
                         else:
-                            self.print(f'Could not read pressure for {channel.name}: {self.PRESSURE_READING_STATUS[int(status)]}.', flag=PRINT.WARNING)
+                            self.print(f'Could not read pressure for {channel.name}: {self.PRESSURE_READING_STATUS[int(status)]}.', flag=PRINT.DEBUG)
                             self.values[i] = np.nan
                     except Exception as e:  # noqa: BLE001
                         self.print(f'Failed to parse pressure from {msg}: {e}', flag=PRINT.ERROR)
@@ -133,6 +134,7 @@ class PressureController(DeviceController):
                     self.port.close()
                     self.port = None
         self.initialized = False
+        self.closing = False
 
     def TPGWrite(self, message: str) -> None:
         """TPG specific serial write.

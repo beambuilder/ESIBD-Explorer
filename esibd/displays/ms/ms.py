@@ -29,7 +29,8 @@ class MS(Plugin):
     quick estimate of charge state and mass, based on minimizing the standard
     deviation of the mass as a function of possible charge states. The
     detailed results are shown in the graph, and help to evaluate the
-    quality of the estimate. Use Ctrl + right mouse click to reset."""
+    quality of the estimate. Use Ctrl + right mouse click to reset.
+    """
 
     name = 'MS'
     version = '1.0'
@@ -87,8 +88,8 @@ class MS(Plugin):
         if super().supportsFile(file):
             first_line = ''
             try:
-                with file.open(encoding=self.UTF8) as _file:
-                    first_line = _file.readline()
+                with file.open(encoding=self.UTF8) as open_file:
+                    first_line = open_file.readline()
             except UnicodeDecodeError:
                 return False
             if 'spectrum' in first_line.lower():  # mass spectrum
@@ -165,7 +166,7 @@ class MS(Plugin):
         y_sub = y[x_min_i:x_max_i]
         return (y - np.min(y)) / np.max(y_sub - np.min(y_sub)) * 100
 
-    def smooth(self, y, box_pts) -> np.ndarray:
+    def smooth(self, y: np.ndarray, box_pts: int) -> np.ndarray:
         """Smooths a 1D array.
 
         :param y: Array to be smoothed.

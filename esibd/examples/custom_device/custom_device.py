@@ -19,17 +19,18 @@ def providePlugins() -> 'list[type[Plugin]]':
 
 
 class CustomDevice(Device):
-    """The minimal code in *examples/CustomDevice.py* is an example of how to integrate a custom device.
+    """The minimal code in *examples/custom_device/custom_device.py* is an example of how to integrate a custom device.
 
     Usually only a fraction of the methods shown here need to be implemented. Look at the other examples and :ref:`sec:plugin_system` for more details.
     """
 
-    documentation = """The minimal code in examples/CustomDevice.py is an example of how to integrate a custom device.
-     Usually only a fraction of the methods shown here need to be implemented. Look at the other examples for more details."""
+    documentation = """The minimal code in examples/custom_device/custom_device.py is an example of how to integrate a custom device.
+     Usually only a fraction of the methods shown here need to be implemented. Look at the other examples for more details.
+     """
 
     name = 'CustomDevice'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.INPUTDEVICE
     iconFile = 'cookie.png'
     # TODO adjust flags to choose default behavior. All default functions can be extended or overwritten if more customization is required.
@@ -222,4 +223,6 @@ class CustomController(DeviceController):
                 # try to close port even if lock could not be acquired! resulting errors should be excepted
                 self.port.close()
                 self.port = None
-        self.initialized = False  # call this last
+        # call thess last
+        self.initialized = False
+        self.closing = False

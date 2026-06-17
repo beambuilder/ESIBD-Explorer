@@ -8,7 +8,7 @@ call conda create -y -n "esibd-offline" python=3.11
 call conda activate esibd-offline
 call pip install esibd-explorer
 REM typically version does not need to be specified
-REM call pip install esibd-explorer==0.8.2
+REM call pip install esibd-explorer==1.0.1
 call conda activate base
 REM Note: add any additional custom requirements here
 REM call conda install your-requirements

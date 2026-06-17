@@ -60,7 +60,7 @@ DEBUG:root:Processing: what=method, name=esibd.plugins.Device.close
 DEBUG:root:Processing: what=method, name=esibd.plugins.Device.closeCommunication
 DEBUG:root:Processing: what=attribute, name=esibd.plugins.Device.documentation
 DEBUG:root:Processing: what=method, name=esibd.plugins.Device.getDefaultSettings
-DEBUG:root:Processing: what=method, name=esibd.plugins.Device.getUnit
+DEBUG:root:Processing: what=method, name=esibd.plugins.Device.getDisplayUnit
 DEBUG:root:Processing: what=method, name=esibd.plugins.Device.initializeCommunication
 DEBUG:root:Processing: what=method, name=esibd.plugins.Device.initialized
 DEBUG:root:Processing: what=attribute, name=esibd.plugins.Device.inout

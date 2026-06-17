@@ -21,7 +21,7 @@ class PICO(Device):
 
     name = 'PICO'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.OUTPUTDEVICE
     unit = 'K'
     iconFile = 'pico_104.png'
@@ -46,6 +46,7 @@ class PICO(Device):
 
     def changeUnit(self) -> None:
         """Update plots to account for change of unit."""
+        self.pluginManager.connectAllSources()
         if self.liveDisplayActive():
             self.clearPlot()
             self.liveDisplay.plot(apply=True)
@@ -61,7 +62,7 @@ class PICO(Device):
     def convertDataDisplay(self, data: np.ndarray) -> np.ndarray:
         return data - 273.15 if self.unitAction.state else data
 
-    def getUnit(self) -> str:
+    def getDisplayUnit(self) -> str:
         return '°C' if self.unitAction.state else self.unit
 
     def updateTheme(self) -> None:
@@ -88,6 +89,7 @@ class TemperatureChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Temp (K)'
+        channel[self.VALUE][Parameter.UNIT] = 'K'
         channel[self.VALUE][Parameter.VALUE] = np.nan  # undefined until communication established
         channel[self.CHANNEL] = parameterDict(value='USBPT104_CHANNEL_1', parameterType=PARAMETERTYPE.COMBO, advanced=True,
                                     attr='channel', items='USBPT104_CHANNEL_1, USBPT104_CHANNEL_2, USBPT104_CHANNEL_3, USBPT104_CHANNEL_4')
@@ -102,6 +104,11 @@ class TemperatureChannel(Channel):
         self.displayedParameters.append(self.CHANNEL)
         self.displayedParameters.append(self.DATATYPE)
         self.displayedParameters.append(self.NOOFWIRES)
+
+    def realChanged(self) -> None:
+        self.getParameterByName(self.CHANNEL).setVisible(self.real)
+        self.getParameterByName(self.DATATYPE).setVisible(self.real)
+        self.getParameterByName(self.NOOFWIRES).setVisible(self.real)
 
 
 class TemperatureController(DeviceController):
@@ -162,3 +169,4 @@ class TemperatureController(DeviceController):
             with self.lock.acquire_timeout(1, timeoutMessage='Cannot acquire lock to close PT-104.'):
                 self.usbPt104.UsbPt104CloseUnit(self.chandle)  # type: ignore  # noqa: PGH003
         self.initialized = False
+        self.closing = False

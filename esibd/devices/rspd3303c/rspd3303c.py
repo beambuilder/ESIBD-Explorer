@@ -23,7 +23,7 @@ class RSPD3303C(Device):
 
     name = 'RSPD3303C'
     version = '1.0'
-    supportedVersion = '0.8'
+    supportedVersion = '1.0'
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = 'V'
     useMonitors = True
@@ -34,7 +34,6 @@ class RSPD3303C(Device):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.channelType = VoltageChannel
-        self.shutDownActive = False
         self.shutDownTimer = QTimer(self)
         self.shutDownTimer.timeout.connect(self.updateTimer)
 
@@ -65,30 +64,32 @@ class RSPD3303C(Device):
         return defaultSettings
 
     def initTimer(self) -> None:
-        """Initialize the shutdown timer."""
+        """Initialize the shutdown timer. Only called once user confirms change of shutDownTime."""
         if self.shutDownTime != 0:
-            if (self.shutDownTime < 10 or  # notify every minute  # noqa: PLR0916, PLR2004
-            (self.shutDownTime < 60 and self.shutDownTime % 10 == 0) or  # notify every 10 minutes  # noqa: PLR2004
-            (self.shutDownTime < 600 and self.shutDownTime % 60 == 0) or  # notify every hour  # noqa: PLR2004
-            (self.shutDownTime % 600 == 0) or
-            not self.shutDownActive):  # notify every 10 hours
-                self.print(f'Will turn off in {self.shutDownTime} minutes.')
-            self.shutDownTimer.start(60000)  # 1 min steps steps
-            self.shutDownActive = True
+            if not self.isOn():
+                self.print('Ignoring shutdown timer as device is already off.')
+                return
+            self.print(f'Will turn off in {self.shutDownTime} minutes.')
+            self.shutDownTimer.start(60000)  # 1 min steps
 
     def updateTimer(self) -> None:
         """Update the shutdowntimer, notifies about remaining time and turns of the device once expired."""
-        self.shutDownTime = max(0, self.shutDownTime - 1)
-        if self.shutDownTime == 1:
+        self.pluginManager.Settings.settings[f'{self.name}/{self.SHUTDOWNTIMER}'].setValueWithoutEvents(max(0, self.shutDownTime - 1))
+        if self.shutDownTime > 1:
+            if (self.shutDownTime < 10 or  # notify every minute  # noqa: PLR0916, PLR2004
+            (self.shutDownTime < 60 and self.shutDownTime % 10 == 0) or  # notify every 10 minutes  # noqa: PLR2004
+            (self.shutDownTime < 600 and self.shutDownTime % 60 == 0) or  # notify every hour  # noqa: PLR2004
+            (self.shutDownTime % 600 == 0)):  # notify every 10 hours
+                self.print(f'Will turn off in {self.shutDownTime} minutes.')
+        elif self.shutDownTime == 1:
             self.print('Timer expired. Setting PID off and heater voltages to 0 V.', flag=PRINT.WARNING)
             if hasattr(self.pluginManager, 'PID'):
                 self.pluginManager.PID.setOn(on=False)
             for channel in self.channels:
                 channel.value = 0
-        if self.shutDownTime == 0:
+        elif self.shutDownTime == 0:
             self.print('Timer expired. Turning off.', flag=PRINT.WARNING)
             self.shutDownTimer.stop()
-            self.shutDownActive = False
             self.setOn(on=False)
 
 
@@ -108,11 +109,14 @@ class VoltageChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Voltage (V)'  # overwrite to change header
+        channel[self.VALUE][Parameter.UNIT] = 'V'
+        channel[self.MONITOR][Parameter.HEADER] = 'Monitor (V)'
+        channel[self.MONITOR][Parameter.UNIT] = 'V'
         channel[self.MIN][Parameter.VALUE] = 0
         channel[self.MAX][Parameter.VALUE] = 1  # start with safe limits
-        channel[self.POWER] = parameterDict(value=np.nan, parameterType=PARAMETERTYPE.FLOAT, advanced=False,
-                                                indicator=True, attr='power', restore=False, header='Power (W)')
-        channel[self.CURRENT] = parameterDict(value=np.nan, parameterType=PARAMETERTYPE.FLOAT, advanced=True,
+        channel[self.POWER] = parameterDict(value=np.nan, parameterType=PARAMETERTYPE.FLOAT, advanced=False, recorded=True,
+                                                indicator=True, attr='power', restore=False, header='Power (W)', unit='W')
+        channel[self.CURRENT] = parameterDict(value=np.nan, parameterType=PARAMETERTYPE.FLOAT, advanced=True, unit='A',
                                                 indicator=True, attr='current', restore=False, header='Current (A)')
         channel[self.ID] = parameterDict(value=0, parameterType=PARAMETERTYPE.INT, advanced=True,
                                     header='ID', minimum=0, maximum=99, attr='id')
@@ -143,12 +147,13 @@ class VoltageController(DeviceController):
 
     port: 'pyvisa.resources.usb.USBInstrument | None'
     controllerParent: RSPD3303C
+    rm: 'pyvisa.ResourceManager | None' = None
 
     def runInitialization(self) -> None:
         try:
-            rm = pyvisa.ResourceManager()
-            # name = rm.list_resources()  # noqa: ERA001
-            self.port = rm.open_resource(self.controllerParent.address, open_timeout=500)  # type: ignore  # noqa: PGH003
+            self.rm = pyvisa.ResourceManager()
+            # name = self.rm.list_resources()  # noqa: ERA001
+            self.port = self.rm.open_resource(self.controllerParent.address, open_timeout=500)  # type: ignore  # noqa: PGH003
             if self.port:
                 self.controllerParent.print(self.port.query('*IDN?'))
                 self.signalComm.initCompleteSignal.emit()
@@ -163,8 +168,15 @@ class VoltageController(DeviceController):
 
     def readNumbers(self) -> None:
         for i, channel in enumerate(self.controllerParent.getChannels()):
-            self.values[i] = float(self.RSQuery(f'MEAS:VOLT? CH{channel.id}', already_acquired=True))
-            self.currents[i] = float(self.RSQuery(f'MEAS:CURR? CH{channel.id}', already_acquired=True))
+            if channel.enabled and channel.active and channel.real:
+                try:
+                    self.values[i] = float(self.RSQuery(f'MEAS:VOLT? CH{channel.id}', already_acquired=True))
+                    self.currents[i] = float(self.RSQuery(f'MEAS:CURR? CH{channel.id}', already_acquired=True))
+                except ValueError as e:
+                    self.print(f'Error while reading values: {e}', flag=PRINT.ERROR)
+                    self.errorCount += 1
+                    self.values[i] = np.nan
+                    self.currents[i] = np.nan
 
     def fakeNumbers(self) -> None:
         for i, channel in enumerate(self.controllerParent.getChannels()):
@@ -177,7 +189,11 @@ class VoltageController(DeviceController):
                 self.currents[i] = 50 / self.values[i] if self.values[i] != 0 else 0  # simulate 50 W
 
     def applyValue(self, channel: VoltageChannel) -> None:
-        self.RSWrite(f'CH{channel.id}:VOLT {channel.value if channel.enabled and self.controllerParent.isOn() else 0}')
+        if channel.enabled:
+            # ignore channels that are disabled
+            # prevents edge case where a disabled channel with the same channel ID overwrites an enabled channel
+            # requires users to make sure channels are set to 0 (safe state) before disabling them.
+            self.RSWrite(f'CH{channel.id}:VOLT {channel.value if self.controllerParent.isOn() else 0}')
 
     def updateValues(self) -> None:
         # Overwriting to also update custom current and power parameters.
@@ -196,7 +212,10 @@ class VoltageController(DeviceController):
 
     def closeCommunication(self) -> None:
         super().closeCommunication()
+        if self.rm:
+            self.rm.close()
         self.initialized = False
+        self.closing = False
 
     def RSWrite(self, message) -> None:
         """RS specific pyvisa write.

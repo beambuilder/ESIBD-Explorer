@@ -23,7 +23,8 @@ class HOLO(Plugin):
 
     documentation = """The Holo plugin was designed to display 3D NumPy arrays such as
     holograms from low energy electron holography (LEEH).
-    Interactive 3D surface plots with density thresholds allow for efficient visualization of very large files."""
+    Interactive 3D surface plots with density thresholds allow for efficient visualization of very large files.
+    """
 
     name = 'Holo'
     version = '1.0'
