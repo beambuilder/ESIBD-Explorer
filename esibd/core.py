@@ -13,7 +13,7 @@ import threading
 import time
 import traceback
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -1018,6 +1018,12 @@ class Logger(QObject):
             self.logFilePath = getValidConfigPath() / f'{PROGRAM_NAME.lower()}.log'
             self.terminalOut = sys.stdout
             self.terminalErr = sys.stderr
+            for stream in (self.terminalOut, self.terminalErr):
+                # piped stdio (e.g. when spawned by a process manager) defaults to a locale codec like cp1252 that cannot encode the unicode
+                # symbols used in log messages. Replace unencodable characters instead of raising UnicodeEncodeError into the logger.
+                if stream is not None and hasattr(stream, 'reconfigure'):
+                    with suppress(Exception):
+                        stream.reconfigure(errors='replace')
             sys.stderr = sys.stdout = self  # redirect all calls to stdout and stderr to the write function of our logger
             self.log = self.logFilePath.open('a', encoding='utf-8-sig')  # pylint: disable=consider-using-with  # keep file open instead of reopening for every new line
             self.active = True
@@ -1109,7 +1115,12 @@ Generated files: {len(list(self.testLogFilePath.parent.glob('*')))}
         """
         with self.lock.acquire_timeout(1) as lock_acquired:
             if self.terminalOut:  # after packaging with pyinstaller the program will not be connected to a terminal
-                self.terminalOut.write(message)  # write to original stdout
+                try:
+                    self.terminalOut.write(message)  # write to original stdout
+                except (UnicodeEncodeError, OSError):
+                    # a raising terminal stream (encoding mismatch, broken pipe) must never propagate out of the logger:
+                    # acquire_timeout would print the error through this very logger and recurse infinitely. Drop terminal echo, keep the file log.
+                    self.terminalOut = None
             if lock_acquired:
                 self.log.write(message)  # write to log file
                 self.log.flush()
