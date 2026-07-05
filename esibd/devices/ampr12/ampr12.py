@@ -6,6 +6,7 @@ import numpy as np
 
 from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, getTestMode, parameterDict
 from esibd.devices.com_helper import getComPort
+from esibd.devices.lab_telemetry import ChannelThrottle, getLabSink
 from esibd.plugins import Device, Plugin
 
 
@@ -74,7 +75,7 @@ class VoltageChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Voltage (V)'
-        channel[self.COM] = parameterDict(value=getComPort('AMPR1000', default=9), minimum=1, maximum=99, parameterType=PARAMETERTYPE.INT, advanced=True,
+        channel[self.COM] = parameterDict(value=getComPort('AMPR1000', default=8), minimum=1, maximum=99, parameterType=PARAMETERTYPE.INT, advanced=True,
                                           header='COM', toolTip='COM port number of the AMPR-12.', attr='com')
         channel[self.MODULE] = parameterDict(value=0, minimum=0, maximum=11, parameterType=PARAMETERTYPE.INT, advanced=True,
                                              header='Mod', toolTip='Module address (0-11).', attr='module')
@@ -108,7 +109,13 @@ class VoltageController(DeviceController):
     def __init__(self, controllerParent: AMPR12) -> None:
         super().__init__(controllerParent=controllerParent)
         self.amprs = {}  # COM port -> AMPR instance
+        self.telemetryThrottle = ChannelThrottle()
         self.initCOMs()
+
+    def _labDeviceName(self, com: int) -> str:
+        """Telemetry device name for a COM port: the canonical com_ports key (AMPR500/AMPR1000) where known."""
+        names = {getComPort(key, default=-1): key for key in ('AMPR500', 'AMPR1000')}
+        return names.get(com, f'AMPR12_COM{com}')
 
     def initCOMs(self) -> None:
         """Initialize COM port list."""
@@ -126,10 +133,13 @@ class VoltageController(DeviceController):
         try:
             from devices.cgc import AMPR
 
+            sink = getLabSink()
+            if sink is None:
+                self.print('Telemetry sink unavailable (LAB_CONFIG not set?) — running without telemetry.db writes.', flag=PRINT.DEBUG)
             self.amprs = {}
             for com in self.COMs:
                 self.print(f'Connecting to AMPR-12 on COM{com}...')
-                ampr = AMPR(device_id=f'ampr12_com{com}', com=com, baudrate=230400)
+                ampr = AMPR(device_id=self._labDeviceName(com), com=com, baudrate=230400, sink=sink)
                 if not ampr.connect():
                     self.print(f'Failed to connect to AMPR-12 on COM{com}.', flag=PRINT.ERROR)
                     return
@@ -163,6 +173,36 @@ class VoltageController(DeviceController):
             self.print(f'Error initializing AMPR-12: {e}', flag=PRINT.ERROR)
         finally:
             self.initializing = False
+
+    def fakeInitialization(self) -> None:
+        """Create simulated esibd_bs devices before faking init, so Test Mode telemetry lands in the shared db with sim=1."""
+        self.initCOMs()
+        self.amprs = {}
+        try:
+            from devices.cgc import AMPR
+
+            sink = getLabSink()
+            if sink is not None:
+                for com in self.COMs:
+                    ampr = AMPR(device_id=self._labDeviceName(com), com=com, baudrate=230400, sink=sink, test_mode=True)
+                    ampr.connect()
+                    self.amprs[com] = ampr
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Test Mode runs without telemetry devices: {e}', flag=PRINT.DEBUG)
+        super().fakeInitialization()
+
+    def _pushTelemetry(self) -> None:
+        """Write the freshly read channel values to the telemetry sink, throttled per channel (>=5 s)."""
+        if not self.amprs or self.values is None:
+            return
+        for i, channel in enumerate(self.controllerParent.getChannels()):
+            if not (channel.enabled and channel.real and i < len(self.values)):
+                continue
+            value = float(self.values[i])
+            ampr = self.amprs.get(channel.com)
+            if ampr is None or not np.isfinite(value) or not self.telemetryThrottle.ready(channel.name):
+                continue
+            ampr.log_sample(channel.name, value, self.controllerParent.unit)
 
     def applyValue(self, channel: VoltageChannel) -> None:
         ampr = self.amprs.get(channel.com)
@@ -206,6 +246,7 @@ class VoltageController(DeviceController):
             except Exception as e:  # noqa: BLE001
                 self.print(f'Error reading COM{com} module {module}: {e}', flag=PRINT.ERROR)
                 self.errorCount += 1
+        self._pushTelemetry()
 
     def fakeNumbers(self) -> None:
         for i, channel in enumerate(self.controllerParent.getChannels()):
@@ -214,6 +255,7 @@ class VoltageController(DeviceController):
                     self.values[i] = channel.value + 5 * self.rng.choice([0, 1], p=[0.98, 0.02]) + self.rng.random() - 0.5
                 else:
                     self.values[i] = 5 * self.rng.choice([0, 1], p=[0.9, 0.1]) + self.rng.random() - 0.5
+        self._pushTelemetry()
 
     def updateValues(self) -> None:
         if self.values is None:

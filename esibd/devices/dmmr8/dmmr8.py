@@ -5,6 +5,7 @@ import numpy as np
 
 from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, getTestMode, parameterDict
 from esibd.devices.com_helper import getComPort
+from esibd.devices.lab_telemetry import ChannelThrottle, getLabSink
 from esibd.plugins import Device, Plugin
 
 
@@ -122,28 +123,23 @@ class DMMR8Controller(DeviceController):
     def __init__(self, controllerParent: DMMR8) -> None:
         super().__init__(controllerParent=controllerParent)
         self.pa = None  # PA device instance
+        self.telemetryThrottle = ChannelThrottle()
 
     def runInitialization(self) -> None:
         try:
             from devices.cgc import PA
 
             com = self.controllerParent.comPort
+            sink = getLabSink()
+            if sink is None:
+                self.print('Telemetry sink unavailable (LAB_CONFIG not set?) — running without telemetry.db writes.', flag=PRINT.DEBUG)
             self.print(f'Connecting to DMMR-8 on COM{com}...')
-            self.pa = PA(device_id='dmmr8_esibd', com=com, baudrate=230400)
+            self.pa = PA(device_id='DMMR8', com=com, baudrate=230400, sink=sink)
 
+            # connect() runs the full strict bring-up (open -> baud -> set_enable -> set_automatic_current) since P6.2.
             if not self.pa.connect():
                 self.print(f'Failed to connect to DMMR-8 on COM{com}.', flag=PRINT.ERROR)
                 return
-
-            # Enable modules
-            status = self.pa.set_enable(True)
-            if status != self.pa.NO_ERR:
-                self.print(f'Failed to enable modules: status {status}', flag=PRINT.WARNING)
-
-            # Enable automatic current measurement for continuous polling
-            status = self.pa.set_automatic_current(True)
-            if status != self.pa.NO_ERR:
-                self.print(f'Failed to enable automatic current: status {status}', flag=PRINT.WARNING)
 
             self.print(f'DMMR-8 initialized on COM{com} with {NUM_MODULES} modules.')
             self.signalComm.initCompleteSignal.emit()
@@ -151,6 +147,32 @@ class DMMR8Controller(DeviceController):
             self.print(f'Error initializing DMMR-8: {e}', flag=PRINT.ERROR)
         finally:
             self.initializing = False
+
+    def fakeInitialization(self) -> None:
+        """Create a simulated esibd_bs device before faking init, so Test Mode telemetry lands in the shared db with sim=1."""
+        self.pa = None
+        try:
+            from devices.cgc import PA
+
+            sink = getLabSink()
+            if sink is not None:
+                self.pa = PA(device_id='DMMR8', com=self.controllerParent.comPort, baudrate=230400, sink=sink, test_mode=True)
+                self.pa.connect()
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Test Mode runs without telemetry device: {e}', flag=PRINT.DEBUG)
+        super().fakeInitialization()
+
+    def _pushTelemetry(self) -> None:
+        """Write the freshly read channel values to the telemetry sink, throttled per channel (>=5 s)."""
+        if self.pa is None or self.values is None:
+            return
+        for i, channel in enumerate(self.controllerParent.getChannels()):
+            if not (channel.enabled and channel.real and i < len(self.values)):
+                continue
+            value = float(self.values[i])
+            if not np.isfinite(value) or not self.telemetryThrottle.ready(channel.name):
+                continue
+            self.pa.log_sample(channel.name, value, self.controllerParent.unit)
 
     def readNumbers(self) -> None:
         if self.pa is None or self.values is None:
@@ -185,6 +207,7 @@ class DMMR8Controller(DeviceController):
         if readings_received == 0:
             # No data yet, short sleep to avoid busy-waiting
             time.sleep(0.01)
+        self._pushTelemetry()
 
     def fakeNumbers(self) -> None:
         if self.values is None:
@@ -194,6 +217,7 @@ class DMMR8Controller(DeviceController):
             if channel.enabled:
                 # Simulate slowly varying currents in pA range
                 self.values[i] = (np.sin(t / 10 + i * 1.5) * 5 + self.rng.random() * 0.5 + 10 + i * 3)
+        self._pushTelemetry()
 
     def closeCommunication(self) -> None:
         super().closeCommunication()
