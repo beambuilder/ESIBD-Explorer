@@ -103,6 +103,10 @@ The Lauda chiller plugin was deleted 2026-07-05 (P6.0) — chillers are handled 
 
 COM port assignments are centralized in `esibd/devices/com_ports.json` (all lab devices, COM3–COM27). Device plugins read from this file via `getComPort()` from `esibd/devices/com_helper.py`. The JSON key for the DMMR-8 is `pA`. Update the JSON when COM ports change — no need to edit individual plugins.
 
+**Telemetry sink (P6.3):** device plugins write their read-loop values into the shared lab `telemetry.db` via `esibd/devices/lab_telemetry.py` — `getLabSink()` (process-wide SQLiteSink, resolved from the `LAB_CONFIG` env var → lab_config.toml `[telemetry] db_path`; the lab_services master sets LAB_CONFIG for its children) and `ChannelThrottle` (≥5 s per channel). Controllers call `device.log_sample(channelName, value, unit)` from `readNumbers()`/`fakeNumbers()`; Test Mode constructs the esibd_bs device with `test_mode=True` so its rows carry sim=1. Without LAB_CONFIG there is no sink and plugins behave as before. Never add a second polling thread for telemetry — pushes ride the existing read loop.
+
+**Locking rule:** every esibd_bs vendor-DLL call in a plugin must hold the controller `self.lock` (`acquire_timeout`). The framework locks `readNumbers()`/`applyValue()` only; an unlocked call from `toggleOn()`/`closeCommunication()` garbles the in-flight serial exchange for both threads (real-HW -13 storms, 2026-07-05).
+
 Key gotcha: **Settings > General > Test Mode** must be unchecked for real hardware communication.
 When Test Mode is on, `fakeInitialization()` and `fakeNumbers()` run instead of real hardware code (`core.py:5483,5605`).
 
