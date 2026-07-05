@@ -44,6 +44,9 @@ todo.txt
 # other
 start.py
 
+# runtime device logs (esibd_bs device loggers write logs/ into the cwd)
+logs/
+
 # large media files
 docs/pages/esibd.pptx
 esibd/media/icon.pptx
