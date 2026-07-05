@@ -269,11 +269,19 @@ class VoltageController(DeviceController):
         on = self.controllerParent.isOn()
         for com, ampr in self.amprs.items():
             try:
-                psu_status, enabled = ampr.enable_psu(on)
+                # The DLL exchange rides the same serial channel as readNumbers/applyValue —
+                # an unlocked call garbles whatever exchange is in flight (status -13 storms
+                # observed on real hardware 2026-07-05), so every DLL call must hold the lock.
+                with self.lock.acquire_timeout(2, timeoutMessage=f'Cannot acquire lock to toggle PSU on COM{com}.') as lock_acquired:
+                    if not lock_acquired:
+                        continue
+                    psu_status, enabled = ampr.enable_psu(on)
                 if psu_status != ampr.NO_ERR:
                     self.print(f'Failed to {"enable" if on else "disable"} PSU on COM{com}: status {psu_status}', flag=PRINT.WARNING)
                 else:
                     self.print(f'AMPR-12 on COM{com}: PSU {"enabled" if enabled else "disabled"}')
+                    if on and not enabled:
+                        self.print(f'AMPR-12 on COM{com}: device refused PSU enable — check the interlock.', flag=PRINT.WARNING)
             except Exception as e:  # noqa: BLE001
                 self.print(f'Error toggling PSU on COM{com}: {e}', flag=PRINT.ERROR)
         if on:
@@ -284,15 +292,16 @@ class VoltageController(DeviceController):
                     self.applyValueFromThread(channel)
 
     def closeCommunication(self) -> None:
-        super().closeCommunication()
+        super().closeCommunication()  # stops acquisition first
         for com, ampr in self.amprs.items():
-            try:
-                ampr.enable_psu(False)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                ampr.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            with self.lock.acquire_timeout(2, timeoutMessage=f'Cannot acquire lock to close COM{com}.'):
+                try:
+                    ampr.enable_psu(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    ampr.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
         self.amprs = {}
         self.initialized = False
