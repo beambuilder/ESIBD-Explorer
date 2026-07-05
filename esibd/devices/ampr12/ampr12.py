@@ -15,6 +15,9 @@ def providePlugins() -> 'list[type[Plugin]]':
     return [AMPR12]
 
 
+HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, enable state) cadence; voltage telemetry stays on ChannelThrottle
+
+
 class AMPR12(Device):
     """Contains a list of voltage channels from one or multiple CGC AMPR-12 power supplies.
 
@@ -110,6 +113,7 @@ class VoltageController(DeviceController):
         super().__init__(controllerParent=controllerParent)
         self.amprs = {}  # COM port -> AMPR instance
         self.telemetryThrottle = ChannelThrottle()
+        self.hkPushTimes = {}  # COM port -> last housekeeping push (epoch s)
         self.initCOMs()
 
     def _labDeviceName(self, com: int) -> str:
@@ -203,6 +207,34 @@ class VoltageController(DeviceController):
             if ampr is None or not np.isfinite(value) or not self.telemetryThrottle.ready(channel.name):
                 continue
             ampr.log_sample(channel.name, value, self.controllerParent.unit)
+        self._pushHousekeeping()
+
+    def _pushHousekeeping(self) -> None:
+        """Push electronics housekeeping (internal temps + PSU enable state) to the telemetry sink every HK_PUSH_INTERVAL_S.
+
+        Rides the read loop (which already holds the controller lock) — never a second polling thread on the DLL.
+        DB-only: these are not Explorer channels and never appear in the GUI; the dashboard's Electronics tab reads them.
+        """
+        now = time.time()
+        for com, ampr in self.amprs.items():
+            if now - self.hkPushTimes.get(com, 0.0) < HK_PUSH_INTERVAL_S:
+                continue
+            self.hkPushTimes[com] = now
+            try:
+                (status, _volt_12v, _volt_5v0, _volt_3v3, _volt_agnd, _volt_12vp, _volt_12vn,
+                 _volt_hvp, _volt_hvn, temp_cpu, temp_adc, temp_av, temp_hvp, temp_hvn,
+                 _line_freq) = ampr.get_housekeeping()
+                if status == ampr.NO_ERR:
+                    ampr.log_sample('Temp_CPU', temp_cpu, 'degC', '.1f')
+                    ampr.log_sample('Temp_ADC', temp_adc, 'degC', '.1f')
+                    ampr.log_sample('Temp_AV', temp_av, 'degC', '.1f')
+                    ampr.log_sample('Temp_HV_P', temp_hvp, 'degC', '.1f')
+                    ampr.log_sample('Temp_HV_N', temp_hvn, 'degC', '.1f')
+                state_status, state_hex, _names = ampr.get_device_state()
+                if state_status == ampr.NO_ERR:
+                    ampr.log_sample('PSU_Enabled', 1 if int(state_hex, 16) & 1 else 0)
+            except Exception as e:  # noqa: BLE001
+                self.print(f'Housekeeping push failed for COM{com}: {e}', flag=PRINT.DEBUG)
 
     def applyValue(self, channel: VoltageChannel) -> None:
         ampr = self.amprs.get(channel.com)

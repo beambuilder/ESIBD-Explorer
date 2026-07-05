@@ -16,6 +16,8 @@ def providePlugins() -> 'list[type[Plugin]]':
 
 NUM_MODULES = 5  # Number of DPA-1F modules in this setup
 
+HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, enable state) cadence; current telemetry stays on ChannelThrottle
+
 
 class DMMR8(Device):
     """CGC DMMR-8 picoammeter with DPA-1F current measurement modules.
@@ -124,6 +126,7 @@ class DMMR8Controller(DeviceController):
         super().__init__(controllerParent=controllerParent)
         self.pa = None  # PA device instance
         self.telemetryThrottle = ChannelThrottle()
+        self.hkPushTime = 0.0  # last housekeeping push (epoch s)
 
     def runInitialization(self) -> None:
         try:
@@ -173,6 +176,29 @@ class DMMR8Controller(DeviceController):
             if not np.isfinite(value) or not self.telemetryThrottle.ready(channel.name):
                 continue
             self.pa.log_sample(channel.name, value, self.controllerParent.unit)
+        self._pushHousekeeping()
+
+    def _pushHousekeeping(self) -> None:
+        """Push electronics housekeeping (internal temps + enable state) to the telemetry sink every HK_PUSH_INTERVAL_S.
+
+        Rides the read loop (which already holds the controller lock) — never a second polling thread on the DLL.
+        DB-only: these are not Explorer channels and never appear in the GUI; the dashboard's Electronics tab reads them.
+        """
+        if self.pa is None or time.time() - self.hkPushTime < HK_PUSH_INTERVAL_S:
+            return
+        self.hkPushTime = time.time()
+        try:
+            status, _volt_12v, _volt_5v0, _volt_3v3, temp_cpu = self.pa.get_housekeeping()
+            if status == self.pa.NO_ERR:
+                self.pa.log_sample('Temp_CPU', temp_cpu, 'degC', '.1f')
+            status, base_temp = self.pa.get_base_temp()
+            if status == self.pa.NO_ERR:
+                self.pa.log_sample('Base_Temp', base_temp, 'degC', '.1f')
+            status, enabled = self.pa.get_enable()
+            if status == self.pa.NO_ERR:
+                self.pa.log_sample('Enabled', 1 if enabled else 0)
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Housekeeping push failed: {e}', flag=PRINT.DEBUG)
 
     def readNumbers(self) -> None:
         if self.pa is None or self.values is None:
