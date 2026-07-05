@@ -220,21 +220,25 @@ class VoltageController(DeviceController):
             if now - self.hkPushTimes.get(com, 0.0) < HK_PUSH_INTERVAL_S:
                 continue
             self.hkPushTimes[com] = now
-            try:
-                (status, _volt_12v, _volt_5v0, _volt_3v3, _volt_agnd, _volt_12vp, _volt_12vn,
-                 _volt_hvp, _volt_hvn, temp_cpu, temp_adc, temp_av, temp_hvp, temp_hvn,
-                 _line_freq) = ampr.get_housekeeping()
-                if status == ampr.NO_ERR:
-                    ampr.log_sample('Temp_CPU', temp_cpu, 'degC', '.1f')
-                    ampr.log_sample('Temp_ADC', temp_adc, 'degC', '.1f')
-                    ampr.log_sample('Temp_AV', temp_av, 'degC', '.1f')
-                    ampr.log_sample('Temp_HV_P', temp_hvp, 'degC', '.1f')
-                    ampr.log_sample('Temp_HV_N', temp_hvn, 'degC', '.1f')
-                state_status, state_hex, _names = ampr.get_device_state()
-                if state_status == ampr.NO_ERR:
-                    ampr.log_sample('PSU_Enabled', 1 if int(state_hex, 16) & 1 else 0)
-            except Exception as e:  # noqa: BLE001
-                self.print(f'Housekeeping push failed for COM{com}: {e}', flag=PRINT.DEBUG)
+            self._pushHousekeepingUnit(com, ampr)
+
+    def _pushHousekeepingUnit(self, com: int, ampr) -> None:
+        """One housekeeping read+push for one unit. Caller must hold the controller lock (or ride the locked read loop)."""
+        try:
+            (status, _volt_12v, _volt_5v0, _volt_3v3, _volt_agnd, _volt_12vp, _volt_12vn,
+             _volt_hvp, _volt_hvn, temp_cpu, temp_adc, temp_av, temp_hvp, temp_hvn,
+             _line_freq) = ampr.get_housekeeping()
+            if status == ampr.NO_ERR:
+                ampr.log_sample('Temp_CPU', temp_cpu, 'degC', '.1f')
+                ampr.log_sample('Temp_ADC', temp_adc, 'degC', '.1f')
+                ampr.log_sample('Temp_AV', temp_av, 'degC', '.1f')
+                ampr.log_sample('Temp_HV_P', temp_hvp, 'degC', '.1f')
+                ampr.log_sample('Temp_HV_N', temp_hvn, 'degC', '.1f')
+            state_status, state_hex, _names = ampr.get_device_state()
+            if state_status == ampr.NO_ERR:
+                ampr.log_sample('PSU_Enabled', 1 if int(state_hex, 16) & 1 else 0)
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Housekeeping push failed for COM{com}: {e}', flag=PRINT.DEBUG)
 
     def applyValue(self, channel: VoltageChannel) -> None:
         ampr = self.amprs.get(channel.com)
@@ -312,6 +316,7 @@ class VoltageController(DeviceController):
                     self.print(f'Failed to {"enable" if on else "disable"} PSU on COM{com}: status {psu_status}', flag=PRINT.WARNING)
                 else:
                     self.print(f'AMPR-12 on COM{com}: PSU {"enabled" if enabled else "disabled"}')
+                    self.hkPushTimes[com] = 0.0  # next read cycle pushes the new enable state to telemetry right away
                     if on and not enabled:
                         self.print(f'AMPR-12 on COM{com}: device refused PSU enable — check the interlock.', flag=PRINT.WARNING)
             except Exception as e:  # noqa: BLE001
@@ -331,6 +336,10 @@ class VoltageController(DeviceController):
                     ampr.enable_psu(False)
                 except Exception:  # noqa: BLE001
                     pass
+                # final hk push so telemetry records the disabled state
+                # (the read loop is already stopped; dashboard staleness
+                # covers a crashed Explorer, this covers a clean close)
+                self._pushHousekeepingUnit(com, ampr)
                 try:
                     ampr.disconnect()
                 except Exception:  # noqa: BLE001

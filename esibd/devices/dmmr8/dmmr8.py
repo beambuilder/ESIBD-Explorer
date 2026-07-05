@@ -178,13 +178,14 @@ class DMMR8Controller(DeviceController):
             self.pa.log_sample(channel.name, value, self.controllerParent.unit)
         self._pushHousekeeping()
 
-    def _pushHousekeeping(self) -> None:
+    def _pushHousekeeping(self, force: bool = False) -> None:
         """Push electronics housekeeping (internal temps + enable state) to the telemetry sink every HK_PUSH_INTERVAL_S.
 
         Rides the read loop (which already holds the controller lock) — never a second polling thread on the DLL.
         DB-only: these are not Explorer channels and never appear in the GUI; the dashboard's Electronics tab reads them.
+        force=True skips the time gate (final push on closeCommunication; caller must hold the controller lock).
         """
-        if self.pa is None or time.time() - self.hkPushTime < HK_PUSH_INTERVAL_S:
+        if self.pa is None or (not force and time.time() - self.hkPushTime < HK_PUSH_INTERVAL_S):
             return
         self.hkPushTime = time.time()
         try:
@@ -246,19 +247,23 @@ class DMMR8Controller(DeviceController):
         self._pushTelemetry()
 
     def closeCommunication(self) -> None:
-        super().closeCommunication()
+        super().closeCommunication()  # stops acquisition first
         if self.pa is not None:
-            try:
-                self.pa.set_automatic_current(False)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                self.pa.set_enable(False)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                self.pa.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock to close DMMR-8.'):
+                try:
+                    self.pa.set_automatic_current(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self.pa.set_enable(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                # final hk push so telemetry records the disabled state
+                # (read loop stopped; dashboard staleness covers a crash)
+                self._pushHousekeeping(force=True)
+                try:
+                    self.pa.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
             self.pa = None
         self.initialized = False
