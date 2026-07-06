@@ -21,9 +21,12 @@ HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, activation state) ca
 class ESI(Device):
     """Contains a list of HV channels of the CGC ESI controller (electrospray high voltage).
 
-    The controller carries up to 4 HV supply modules; the lab uses addresses 2 and 3
-    (notebook 024). Supports monitor readback, a read-only output-current indicator per
-    module, and On/Off logic mapped to the controller + module activation states.
+    The controller carries up to 4 HV supply modules; the lab uses addresses 2 (inlet)
+    and 3 (emitter), notebook 024. Channel values set the target voltage (V); the
+    PLOTTED/RECORDED channel data is the measured module output current in nA — the
+    physically interesting signal (user, 2026-07-06). The voltage readback stays as the
+    monitor (number + deviation warning), and On/Off logic maps to the controller +
+    module activation states.
 
     The ESI-CTRL DLL is SINGLE-INSTANCE per process (no port argument in its exports):
     one controller, one COM port, and never this plugin and an ESI notebook at the
@@ -34,7 +37,7 @@ class ESI(Device):
     version = '1.0'
     supportedVersion = '1.0'
     pluginType = PLUGINTYPE.INPUTDEVICE
-    unit = 'V'
+    unit = 'nA'  # unit of the plotted/recorded channel data (measured current); set values are volts (see HVChannel headers)
     iconFile = 'ESI.png'
     useMonitors = True
     useOnOffLogic = True
@@ -84,8 +87,9 @@ class HVChannel(Channel):
 
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Voltage (V)'
+        channel[self.MONITOR][Parameter.HEADER] = 'U (V)'  # voltage readback; device unit is nA (plotted currents)
         channel[self.CURRENT] = parameterDict(value=0, parameterType=PARAMETERTYPE.FLOAT, advanced=False, header='I (nA)', indicator=True, attr='current',
-                                              toolTip='Measured HV output current (read-only).')
+                                              toolTip='Measured HV output current (read-only). This is what the plot and the recorded data show.')
         channel[self.ADDRESS] = parameterDict(value=2, minimum=0, maximum=3, parameterType=PARAMETERTYPE.INT, advanced=True,
                                               header='Addr', toolTip='HV module address on the ESI controller (0-3; the lab uses 2 and 3).', attr='address')
         return channel
@@ -97,6 +101,24 @@ class HVChannel(Channel):
 
     def tempParameters(self) -> list[str]:
         return [*super().tempParameters(), self.CURRENT]
+
+    def appendValue(self, lenT: int, nan: bool = False) -> None:
+        """Append the measured module current (nA) as the channel data.
+
+        The emitter/inlet currents (modules 3/2) are the signal of interest — plotted and
+        recorded instead of the voltage readback (user, 2026-07-06). The voltage readback
+        remains the monitor and keeps driving the deviation warning. NaN markers and
+        virtual channels fall through to the base class.
+        """
+        if not nan and self.enabled and self.real:
+            self.values.add(x=self.current, lenT=lenT)
+            if self.useBackgrounds:
+                self.backgrounds.add(x=self.background, lenT=lenT)
+            for parameter in self.getRecordedParameters():
+                if isinstance(parameter.value, (float, int)):
+                    parameter.values.add(x=parameter.value, lenT=lenT)
+        else:
+            super().appendValue(lenT, nan=nan)
 
     def monitorChanged(self) -> None:
         self.updateWarningState(self.enabled and self.channelParent.controller.acquiring
@@ -189,7 +211,8 @@ class ESIController(DeviceController):
             value = float(self.values[i])
             if not np.isfinite(value) or not self.telemetryThrottle.ready(channel.name):
                 continue
-            self.esi.log_sample(channel.name, value, self.controllerParent.unit)
+            # explicit 'V': self.values are voltage readbacks; the device unit is 'nA' (plotted currents)
+            self.esi.log_sample(channel.name, value, 'V')
         self._pushHousekeeping()
 
     def _pushHousekeeping(self, force: bool = False) -> None:
