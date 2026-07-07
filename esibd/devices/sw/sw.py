@@ -201,18 +201,28 @@ class SW(Device):
             self.controller.applyConfigFromThread()
 
     def isRunning(self) -> bool:
-        """Return True while the switch actually switches: On and the armed working set is not standby.
+        """Interlock API for the PSU plugin: On, initialized, and the armed working set is not standby.
 
-        Public interlock API (PSU plugin, user 2026-07-07): PSU outputs may only be
-        enabled while their switch runs. In Test Mode the controller's toggleOn never
-        runs (toggleOnFromThread short-circuits to fakeNumbers), so the armed config
-        falls back to the Config dropdown selection.
+        Config is the truth: after every load the dropdown snaps to the loaded config, so the
+        selection of the first real row mirrors the armed working set — a switch parked in
+        standby (config 0) while On reports False. The SWHR plugin must carry the same API.
         """
-        if not (self.isOn() and self.controller.initialized):
+        if not (self.isOn() and self.controller and self.controller.initialized):
             return False
-        if getTestMode():
-            return self.controller._selectedConfig() != STANDBY_CONFIG  # noqa: SLF001
-        return self.controller.armedConfig not in (None, STANDBY_CONFIG)
+        for channel in self.getChannels():
+            if channel.real:
+                return configIndex(channel.configuration) != STANDBY_CONFIG
+        return False
+
+    def setOn(self, on: 'bool | None' = None) -> None:
+        """Warn on a manual switch Off while the PSU plugin is still On (CGC teardown order: PSUs first, then the switch)."""
+        requested = on if on is not None else self.isOn()
+        if on is None and not requested:
+            psu = next((plugin for plugin in self.pluginManager.plugins if plugin.name == 'PSU'), None)
+            if psu is not None and psu.isOn():
+                self.print('PSU plugin is still On — CGC teardown order is PSUs first, then the switch. '
+                           'The switch parks now, but the supplies keep feeding the rails (DC on the chains): disable the PSUs.', flag=PRINT.WARNING)
+        super().setOn(on)
 
     def closeCommunication(self) -> None:
         self.setOn(False)
@@ -311,7 +321,6 @@ class SWController(DeviceController):
         self.telemetryThrottle = ChannelThrottle()
         self.hkPushTime = 0.0  # last housekeeping push (epoch s)
         self.configItems = None  # list of 'index: name' NVM config items (None = not enumerated yet / failed)
-        self.armedConfig = None  # config the switch actually holds (None = unknown/closed/failed load); feeds SW.isRunning()
         self.syncing = False  # True while syncInputs writes the channel inputs — suppresses the apply events they fire
         self.signalComm.configListsChangedSignal.connect(self.updateConfigCombos)
         self.signalComm.workingSetSyncSignal.connect(self.syncInputs)
@@ -587,10 +596,8 @@ class SWController(DeviceController):
         status = self.sw.call_with_retry(self.sw.load_current_config, config)
         if status != self.sw.NO_ERR:
             self.print(f'Failed to load config {config} on the switch: status {status}.', flag=PRINT.ERROR)
-            self.armedConfig = None  # state unknown — the PSU interlock treats it as not running
             return False
         self.print(f'Loaded config {config} on the switch.')
-        self.armedConfig = config
         self.hkPushTime = 0.0  # next read cycle pushes the new enable state to telemetry right away
         return True
 
@@ -601,8 +608,6 @@ class SWController(DeviceController):
         status = self.sw.call_with_retry(self.sw.load_current_config, STANDBY_CONFIG)
         if status != self.sw.NO_ERR:
             self.print(f'PARK NOT CONFIRMED: standby config load returned {status} — verify at the bench.', flag=PRINT.ERROR)
-        # claim standby even when the park failed: for the PSU interlock 'not running' is the safe direction
-        self.armedConfig = STANDBY_CONFIG
         self.hkPushTime = 0.0
 
     def _pushTelemetry(self) -> None:
@@ -798,5 +803,4 @@ class SWController(DeviceController):
                 except Exception:  # noqa: BLE001
                     pass
             self.sw = None
-        self.armedConfig = None
         self.initialized = False
