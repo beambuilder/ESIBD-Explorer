@@ -95,15 +95,17 @@ class SW(Device):
     otherwise the duty drags with every move and width >= period sticks the output HIGH
     (DC on the load). The monoflop rule is validated before anything is written.
 
-    On loads the selected NVM config (Config column; fresh channels default to 89 =
-    SwitchSym 1 MHz, the campaign baseline working set — bare enables arm nothing);
-    Off parks the switch in standby config 0. Selecting a config while On loads it
-    immediately. CONFIG IS THE TRUTH (user decision 2026-07-07, opposite of the PSU
-    plugin): after every config load the frequency/duty INPUTS sync to what the loaded
-    working set actually contains — the channel values are never pushed onto a freshly
-    loaded config. Editing frequency or duty afterwards writes to the device via the
-    campaign move. The dropdown lists 'index: name' read from the device NVM at every
-    initialization (cached between sessions).
+    On ALWAYS loads NVM config 89 (SwitchSym 1 MHz, the campaign baseline working set
+    — bare enables arm nothing; user decision 2026-07-07: the enable path must be
+    deterministic, whatever the dropdown says) and the Config dropdown snaps to 89;
+    Off parks the switch in standby config 0. While On, selecting a config in the
+    dropdown loads it immediately; while Off a selection is only stored. CONFIG IS THE
+    TRUTH (user decision 2026-07-07, opposite of the PSU plugin): after every config
+    load the frequency/duty INPUTS sync to what the loaded working set actually
+    contains — the channel values are never pushed onto a freshly loaded config.
+    Editing frequency or duty afterwards writes to the device via the campaign move.
+    The dropdown lists 'index: name' read from the device NVM at every initialization
+    (cached between sessions).
 
     The save toolbar action stores the CURRENT working set (including manual
     frequency/duty edits) into a chosen NVM slot with a name — build a recipe per
@@ -238,8 +240,9 @@ class RFChannel(Channel):
         channel[self.CONFIG] = parameterDict(value=configDefault, parameterType=PARAMETERTYPE.COMBO, items=', '.join(configItems), fixedItems=True,
                                              advanced=False, header='Config', attr='configuration', event=self.configChanged,
                                              toolTip='NVM config of the switch (index: name) — the full working set incl. enables and trigger routing.\n'
-                                                     'Loaded on On (then the channel frequency/duty is applied on top); selecting while On loads it '
-                                                     'immediately the same way. List refreshes from the device NVM at every initialization.')
+                                                     'On ALWAYS loads the baseline (89) and this dropdown snaps to it; selecting a config while On loads\n'
+                                                     'it immediately and the frequency/duty inputs sync to it (config is the truth). While Off a selection\n'
+                                                     'is only stored. List refreshes from the device NVM at every initialization.')
         return channel
 
     def setDisplayedParameters(self) -> None:
@@ -285,8 +288,8 @@ class SWController(DeviceController):
 
         configListsChangedSignal = pyqtSignal()
         """Signal that transfers the freshly enumerated NVM config list from the init thread to the Config dropdowns."""
-        workingSetSyncSignal = pyqtSignal(float, object)
-        """Signal that transfers the loaded working set (f_khz, {pulser: duty}) from the worker thread to the channel inputs."""
+        workingSetSyncSignal = pyqtSignal(float, object, int)
+        """Signal that transfers the loaded working set (f_khz, {pulser: duty}, config index) from the worker thread to the channel inputs."""
 
     def __init__(self, controllerParent: SW) -> None:
         super().__init__(controllerParent=controllerParent)
@@ -338,8 +341,8 @@ class SWController(DeviceController):
 
             if self.controllerParent.isOn():
                 with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock for the initial bring-up.') as lock_acquired:
-                    if lock_acquired and self._bringUp():
-                        self._emitWorkingSet()
+                    if lock_acquired and self._bringUp(BASELINE_CONFIG):
+                        self._emitWorkingSet(BASELINE_CONFIG)
                 time.sleep(0.2)
 
             self.signalComm.initCompleteSignal.emit()
@@ -444,34 +447,48 @@ class SWController(DeviceController):
             threading.Thread(target=self.applyConfig, name=f'{self.controllerParent.name} applyConfigThread', daemon=True).start()
 
     def applyConfig(self) -> None:
-        """Live config change: load the working set, then sync the frequency/duty INPUTS to it (config is the truth)."""
+        """Live config change: load the SELECTED working set, then sync the frequency/duty INPUTS to it (config is the truth)."""
+        config = self._selectedConfig()
         with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock to load the switch config.') as lock_acquired:
             if not lock_acquired:
                 return
-            if self._bringUp():
-                self._emitWorkingSet()
+            if self._bringUp(config):
+                self._emitWorkingSet(config)
 
-    def _emitWorkingSet(self) -> None:
-        """Read the live working set and hand it to the main thread for the input sync. Caller must hold the controller lock."""
+    def _emitWorkingSet(self, config: int) -> None:
+        """Read the live working set and hand it to the main thread for the input sync. Caller must hold the controller lock.
+
+        The period readback right after a config load has once returned 0 on real hardware
+        (cgc-sw readback quirk) — retry a few times before giving up, and NEVER give up
+        silently: an unsynced input is exactly the confusion this feature is meant to kill.
+        """
         if self.sw is None:
             return
-        status, period = self.sw.call_with_retry(self.sw.get_oscillator_period)
-        if status != self.sw.NO_ERR or period <= 0:
-            return  # standby or failed read — nothing meaningful to sync
+        period = 0
+        for attempt in range(4):
+            if attempt:
+                time.sleep(0.4)
+            status, period = self.sw.call_with_retry(self.sw.get_oscillator_period)
+            if status == self.sw.NO_ERR and period > 0:
+                break
+        else:
+            self.print(f'Working-set readback after loading config {config} returned status {status}, period {period} — '
+                       'frequency/duty inputs NOT synced (see the cgc-sw readback quirk).', flag=PRINT.WARNING)
+            return
         frequency_khz = self.sw.CLOCK / (period + self.sw.OSC_OFFSET) / 1000.0
         duties = {}
         for pulser in {channel.pulser for channel in self.controllerParent.getChannels() if channel.real}:
             width_status, width = self.sw.call_with_retry(self.sw.get_pulser_width, pulser)
             if width_status == self.sw.NO_ERR:
                 duties[pulser] = (width + self.sw.PULSER_WIDTH_OFFSET) / (period + self.sw.OSC_OFFSET)
-        self.signalComm.workingSetSyncSignal.emit(frequency_khz, duties)
+        self.signalComm.workingSetSyncSignal.emit(frequency_khz, duties, config)
 
-    def syncInputs(self, frequency_khz: float, duties: dict) -> None:
-        """Write the loaded working set into the frequency/duty inputs (runs in the main thread).
+    def syncInputs(self, frequency_khz: float, duties: dict, config: int) -> None:
+        """Write the loaded working set into the frequency/duty inputs and snap the Config dropdown (runs in the main thread).
 
         Config is the truth (user 2026-07-07): the inputs follow the loaded config, never the
-        other way around. lastAppliedValue is set alongside so the framework's change detection
-        does not push the synced value back to the device; self.syncing suppresses the events.
+        other way around. lastAppliedValue is set alongside (and read back after the set, so
+        widget rounding cannot re-trigger an apply) and self.syncing suppresses the events.
         Values are clamped to the input ranges — an HF config beyond 1 MHz shows clamped inputs
         (the monitor still shows the real frequency and flags the mismatch).
         """
@@ -482,12 +499,36 @@ class SWController(DeviceController):
                     continue
                 value = round(max(1.0, min(frequency_khz, F_MAX_KHZ)), 3)
                 channel.lastAppliedValue = value  # BEFORE the value event fires, so applyValue sees no change
-                channel.getParameterByName(RFChannel.VALUE).value = value
+                parameter = channel.getParameterByName(RFChannel.VALUE)
+                parameter.value = value
+                channel.lastAppliedValue = parameter.value  # read back what the widget stored (display rounding)
                 duty = duties.get(channel.pulser)
                 if duty is not None:
                     channel.getParameterByName(RFChannel.DUTY).value = round(max(1.0, min(duty * 100.0, 99.0)), 2)
         finally:
             self.syncing = False
+        self._syncConfigSelection(config)
+
+    def _syncConfigSelection(self, config: int) -> None:
+        """Snap the Config dropdown(s) to the loaded config index (main thread; e.g. On always loads the baseline)."""
+        device = self.controllerParent
+        device.syncingConfig = True
+        try:
+            for channel in device.getChannels():
+                if not channel.real:
+                    continue
+                parameter = channel.getParameterByName(RFChannel.CONFIG)
+                if configIndex(parameter.value) == config:
+                    continue
+                match = next((k for k in range(parameter.combo.count()) if configIndex(parameter.combo.itemText(k)) == config), -1)
+                if match == -1:
+                    self.print(f'Loaded config {config} is not in the dropdown list — refresh the configs.', flag=PRINT.WARNING)
+                    continue
+                parameter.combo.blockSignals(True)
+                parameter.combo.setCurrentIndex(match)
+                parameter.combo.blockSignals(False)
+        finally:
+            device.syncingConfig = False
 
     def saveWorkingSet(self, slot: int, name: str) -> None:
         """Store the CURRENT working set in NVM slot + name it, then refresh the dropdown (thread safe, user 2026-07-07)."""
@@ -520,15 +561,14 @@ class SWController(DeviceController):
         else:
             self.print('Switch not connected.', flag=PRINT.WARNING)
 
-    def _bringUp(self) -> bool:
-        """Campaign bring-up: load the selected NVM config — the FULL working set (device/
+    def _bringUp(self, config: int) -> bool:
+        """Campaign bring-up: load one NVM config — the FULL working set (device/
         oscillator/pulser enables + trigger routing); bare enables arm nothing. Caller
-        must hold the controller lock. Returns True when the config is armed; the channel
-        frequency/duty is re-applied by the caller ONLY then — set_rf into the standby
-        working set (pulser delay 0) is rejected as a stuck-HIGH risk."""
+        must hold the controller lock and passes the config explicitly: On always uses
+        the baseline (deterministic enable, user 2026-07-07), the dropdown live-select
+        uses the selection. Returns True when the config is armed."""
         if self.sw is None:
             return False
-        config = self._selectedConfig()
         status = self.sw.call_with_retry(self.sw.load_current_config, config)
         if status != self.sw.NO_ERR:
             self.print(f'Failed to load config {config} on the switch: status {status}.', flag=PRINT.ERROR)
@@ -670,10 +710,12 @@ class SWController(DeviceController):
                 if not lock_acquired:
                     return
                 if on:
-                    # Config is the truth: arm the working set, then sync the inputs to it.
-                    # The channel values are NEVER pushed onto a freshly loaded config.
-                    if self._bringUp():
-                        self._emitWorkingSet()
+                    # Enable is deterministic (user 2026-07-07): ALWAYS the baseline config,
+                    # whatever the dropdown says — the dropdown snaps to it via the sync.
+                    # Config is the truth: the inputs sync to the loaded working set;
+                    # channel values are NEVER pushed onto a freshly loaded config.
+                    if self._bringUp(BASELINE_CONFIG):
+                        self._emitWorkingSet(BASELINE_CONFIG)
                 else:
                     self._standby()
         except Exception as e:  # noqa: BLE001
