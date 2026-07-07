@@ -118,9 +118,6 @@ class SW(Device):
     useOnOffLogic = True
     channels: 'list[RFChannel]'
 
-    # type hints for settings
-    comPort: int
-
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.channelType = RFChannel
@@ -140,10 +137,6 @@ class SW(Device):
         settings = super().getDefaultSettings()
         settings[f'{self.name}/Interval'][Parameter.VALUE] = 1000
         settings[f'{self.name}/{self.MAXDATAPOINTS}'][Parameter.VALUE] = 1E5
-        # Device-level COM port: one switch, one port (channels are logical views on the same oscillator).
-        settings[f'{self.name}/COM Port'] = parameterDict(value=getComPort('swB', default=10), minimum=1, maximum=99,
-                                                          toolTip='COM port number of the swB switch controller.',
-                                                          parameterType=PARAMETERTYPE.INT, attr='comPort')
         return settings
 
     def onConfigSelected(self, channel: 'RFChannel') -> None:
@@ -169,6 +162,7 @@ class SW(Device):
 class RFChannel(Channel):
     """Channel for the switch RF frequency (one oscillator drives both chains)."""
 
+    COM = 'COM'
     DUTY = 'Duty'
     PULSER = 'Pulser'
     CONFIG = 'Config'
@@ -176,6 +170,7 @@ class RFChannel(Channel):
 
     def getDefaultChannel(self) -> dict[str, dict]:
 
+        self.com: int
         self.duty: float
         self.pulser: int
         self.configuration: str
@@ -186,6 +181,9 @@ class RFChannel(Channel):
         channel[self.VALUE][Parameter.MIN] = 1
         channel[self.VALUE][Parameter.MAX] = F_MAX_KHZ
         channel[self.MONITOR][Parameter.HEADER] = 'Measured f (kHz)'
+        channel[self.COM] = parameterDict(value=getComPort('swB', default=10), minimum=1, maximum=99, parameterType=PARAMETERTYPE.INT, advanced=True,
+                                          header='COM', toolTip='COM port number of the switch controller (swB = 10). One switch, one port — '
+                                                                'every real channel is a view on the same oscillator.', attr='com')
         channel[self.DUTY] = parameterDict(value=50.0, minimum=1.0, maximum=99.0, parameterType=PARAMETERTYPE.FLOAT, advanced=False, header='Duty (%)',
                                            toolTip='Pulser duty cycle in percent of the period, re-fit on every frequency move (campaign width re-fit).\n'
                                                    'Changing it re-applies immediately while On. The monoflop rule is validated before every write.',
@@ -204,6 +202,7 @@ class RFChannel(Channel):
         self.insertDisplayedParameter(self.CONFIG, before=self.DISPLAY)
         self.insertDisplayedParameter(self.DUTY, before=self.DISPLAY)
         self.displayedParameters.append(self.PULSER)
+        self.displayedParameters.append(self.COM)
 
     def dutyChanged(self) -> None:
         """Re-apply the channel while On so a duty edit takes effect immediately (frequency edits go through the normal value path)."""
@@ -222,7 +221,7 @@ class RFChannel(Channel):
                                 and abs(self.monitor - self.value) > max(2, 0.02 * self.value))
 
     def realChanged(self) -> None:
-        for name in (self.DUTY, self.PULSER, self.CONFIG):
+        for name in (self.COM, self.DUTY, self.PULSER, self.CONFIG):
             self.getParameterByName(name).setVisible(self.real)
         super().realChanged()
 
@@ -252,11 +251,18 @@ class SWController(DeviceController):
         if channels:
             self.values = np.full(len(channels), fill_value=np.nan, dtype=np.float32)
 
+    def _comPort(self) -> int:
+        """COM port from the first real channel (one switch, one port; fallback: the com_ports.json key)."""
+        for channel in self.controllerParent.getChannels():
+            if channel.real:
+                return channel.com
+        return getComPort('swB', default=10)
+
     def runInitialization(self) -> None:
         try:
             from devices.cgc import SW as SWDevice
 
-            com = self.controllerParent.comPort
+            com = self._comPort()
             sink = getLabSink()
             if sink is None:
                 self.print('Telemetry sink unavailable (LAB_CONFIG not set?) — running without telemetry.db writes.', flag=PRINT.DEBUG)
@@ -271,6 +277,8 @@ class SWController(DeviceController):
             if len(realChannels) > 1:
                 self.print('More than one real channel configured — swB has ONE oscillator; every row drives the same frequency '
                            'and the first row wins for the Config selection.', flag=PRINT.WARNING)
+            if any(channel.com != com for channel in realChannels):
+                self.print(f'Real channels disagree on the COM port — using COM{com} from the first real row.', flag=PRINT.WARNING)
             self.configItems = self._enumerateConfigs(self.sw)
             # emitted before initCompleteSignal so the dropdown is refreshed before initComplete can trigger the On bring-up
             self.signalComm.configListsChangedSignal.emit()
@@ -296,7 +304,7 @@ class SWController(DeviceController):
 
             sink = getLabSink()
             if sink is not None:
-                self.sw = SWDevice(device_id='swB', com=self.controllerParent.comPort, port=0, baudrate=230400, sink=sink,
+                self.sw = SWDevice(device_id='swB', com=self._comPort(), port=0, baudrate=230400, sink=sink,
                                    test_mode=True, skip_sensors=(0,))
                 self.sw.connect()
         except Exception as e:  # noqa: BLE001
@@ -321,7 +329,9 @@ class SWController(DeviceController):
             for index, is_valid in enumerate(valid):
                 if not is_valid:
                     continue
-                name_status, name = sw.get_config_name(index)
+                # retry net on every name read too — one corrupted exchange in this
+                # 100+-query loop would otherwise desync the wire for good (EMI, -13)
+                name_status, name = sw.call_with_retry(sw.get_config_name, index)
                 items.append(f'{index}: {name.replace(",", ";")}' if name_status == sw.NO_ERR and name else f'{index}: <unnamed>')
         except Exception as e:  # noqa: BLE001
             self.print(f'NVM enumeration failed: {e}', flag=PRINT.WARNING)
@@ -340,7 +350,7 @@ class SWController(DeviceController):
             return
         if not getTestMode():
             cache = loadConfigCache()
-            cache[str(self.controllerParent.comPort)] = items
+            cache[str(self._comPort())] = items
             saveConfigCache(cache)
         device = self.controllerParent
         device.syncingConfig = True
@@ -475,12 +485,16 @@ class SWController(DeviceController):
             return
         try:
             status, period = self.sw.call_with_retry(self.sw.get_oscillator_period)
-            if status == self.sw.NO_ERR and period > 0:
-                frequency_khz = self.sw.CLOCK / (period + self.sw.OSC_OFFSET) / 1000.0
+            if status == self.sw.NO_ERR:
+                # Standby (config 0) zeroes the period register — the device answered fine,
+                # there is just no oscillation to report (real swB, 2026-07-07). NEVER an error:
+                # a parked switch otherwise counts to 25 and the framework closes communication.
+                frequency_khz = self.sw.CLOCK / (period + self.sw.OSC_OFFSET) / 1000.0 if period > 0 else np.nan
                 self.errorCount = 0
             else:
                 frequency_khz = np.nan
                 self.errorCount += 1
+                self.print(f'get_oscillator_period failed: status {status}', flag=PRINT.WARNING)
             for i, channel in enumerate(self.controllerParent.getChannels()):
                 if channel.enabled and channel.real and i < len(self.values):
                     self.values[i] = frequency_khz
