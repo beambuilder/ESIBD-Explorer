@@ -1,11 +1,13 @@
 # pylint: disable=[missing-module-docstring]  # see class docstrings
+import json
 import threading
 import time
 from typing import cast
 
 import numpy as np
+from PyQt6.QtCore import pyqtSignal
 
-from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, parameterDict
+from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, getTestMode, getValidConfigPath, parameterDict
 from esibd.devices.com_helper import getComPort
 from esibd.devices.lab_telemetry import ChannelThrottle, getLabSink
 from esibd.plugins import Device, Plugin
@@ -20,6 +22,62 @@ HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, enable states) caden
 P_LIMIT_W = 100.0  # CGC dissipation limit per switch channel (campaign 2026-07-06: swB hit 98.8 W at the envelope top)
 V_MAX = 350.0  # absolute output ceiling (HV-PSU-CTRL-2D full range)
 UNIT_KEYS = ('PSU1', 'PSU2', 'PSU3', 'PSU4')  # canonical com_ports keys; dll device index = key number - 1 (notebook 025)
+BASELINE_CONFIG = 63  # campaign baseline NVM slot: 10 V / 100 mA, all enables on
+STANDBY_CONFIG = 0  # park slot: everything off
+CONFIG_CACHE_FILE = 'psu_nvm_configs.json'  # last known NVM lists per COM, seeds the Config dropdowns before enumeration
+TESTMODE_CONFIG_ITEMS = ('0: STANDBY', '19: LADDER_0V', '54: LADDER_350V', '63: BASELINE_10V_100MA')  # canned campaign slots for Test Mode
+
+
+def configIndex(item) -> 'int | None':
+    """Return the leading integer of a '<index>: <name>' dropdown item (or a bare index string)."""
+    try:
+        return int(str(item).split(':', 1)[0])
+    except ValueError:
+        return None
+
+
+def loadConfigCache() -> dict:
+    """Return the last known NVM config lists per COM port (written after every real enumeration)."""
+    file = getValidConfigPath() / CONFIG_CACHE_FILE
+    try:
+        if file.exists():
+            return json.loads(file.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def saveConfigCache(cache: dict) -> None:
+    """Persist the NVM config lists so the next session's dropdowns seed with real items."""
+    try:
+        (getValidConfigPath() / CONFIG_CACHE_FILE).write_text(json.dumps(cache, indent=2), encoding='utf-8')
+    except OSError:
+        pass
+
+
+def mergedConfigItems() -> tuple[list[str], str]:
+    """Return the Config dropdown seed (items, default item).
+
+    Union of all cached per-unit lists, deduplicated by index, plus bare fallbacks.
+    The union guarantees that any saved channel selection finds its item at channel-file
+    load time (a COMBO value missing from the items resets to item 0); the fresh
+    per-unit enumeration replaces the list right after the units connect.
+    """
+    seen = set()
+    items = []
+    for cachedList in loadConfigCache().values():
+        for item in cachedList:
+            index = configIndex(item)
+            if index is not None and index not in seen:
+                seen.add(index)
+                items.append(item)
+    for fallback in (BASELINE_CONFIG, STANDBY_CONFIG):
+        if fallback not in seen:
+            seen.add(fallback)
+            items.append(str(fallback))
+    items.sort(key=lambda item: configIndex(item) or 0)
+    default = next((item for item in items if configIndex(item) == BASELINE_CONFIG), items[0])
+    return items, default
 
 
 class PSU(Device):
@@ -32,11 +90,17 @@ class PSU(Device):
     (current grows with switching frequency; ESI plugin precedent). The voltage readback
     stays as the monitor (deviation warning).
 
-    On/Off loads the baseline NVM config per unit (default slot 63 = 10 V / 100 mA, all
-    enables on — campaign-proven bring-up; bare enables arm nothing) and then re-applies
-    every channel's voltage + current limit; Off parks the units in standby config 0.
+    On loads each unit's selected NVM config (Config column, mirrored across the two
+    rows of one supply; fresh channels default to 63 = 10 V / 100 mA, all enables on —
+    campaign-proven bring-up; bare enables arm nothing) and then re-applies every
+    channel's voltage + current limit; Off parks the units in standby config 0.
+    Selecting a config while On loads it immediately, sets the enables from the E
+    checkboxes and re-applies the channel values — the channel table stays the voltage
+    truth (design choice 2026-07-07, see the KB cgc-psu page for the alternatives).
+    The dropdown lists 'index: name' read from the device NVM at every initialization
+    (cached between sessions so saved selections survive the restart).
     A soft watchdog on the readback enforces the campaign limits (per-channel I_lim,
-    100 W): first breach steps the setpoint down 10 %, a second consecutive breach
+    100 W): first breach steps the setpoint down 10 percent, a second consecutive breach
     disables both outputs of that supply.
 
     Recommended channel set (build once, saved with your config) — 8 real channels:
@@ -60,12 +124,10 @@ class PSU(Device):
     useOnOffLogic = True
     channels: 'list[PSUChannel]'
 
-    # type hints for settings
-    baselineConfig: int
-
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.channelType = PSUChannel
+        self.syncingConfig = False  # guards the Config-mirroring event against recursion and programmatic updates
 
     def initGUI(self) -> None:
         super().initGUI()
@@ -81,11 +143,26 @@ class PSU(Device):
         settings = super().getDefaultSettings()
         settings[f'{self.name}/Interval'][Parameter.VALUE] = 1000
         settings[f'{self.name}/{self.MAXDATAPOINTS}'][Parameter.VALUE] = 1E5
-        settings[f'{self.name}/Baseline config'] = parameterDict(value=63, minimum=0, maximum=167, parameterType=PARAMETERTYPE.INT, attr='baselineConfig',
-                                                                 toolTip='NVM config slot (python 0-based) loaded on every unit when turning On.\n'
-                                                                         'Default 63 = 10 V / 100 mA, all enables on (campaign baseline). '
-                                                                         'Bring-up must go through a config — bare enables arm nothing.')
         return settings
+
+    def onConfigSelected(self, channel: 'PSUChannel') -> None:
+        """Mirror the Config selection to all rows of the same unit; load it right away if On.
+
+        Design choice 2026-07-07 (Option A): live-select performs load_current_config,
+        then enables from the E checkboxes, then re-applies channel V + I_lim — the
+        channel table stays the voltage truth. While Off the selection is stored only.
+        """
+        if self.syncingConfig or not channel.real:
+            return
+        self.syncingConfig = True
+        try:
+            for sibling in self.getChannels():
+                if sibling is not channel and sibling.real and sibling.com == channel.com and sibling.configuration != channel.configuration:
+                    sibling.getParameterByName(PSUChannel.CONFIG).value = channel.configuration
+        finally:
+            self.syncingConfig = False
+        if self.isOn():
+            self.controller.applyConfigFromThread(channel.com)
 
     def getCOMs(self) -> list[int]:
         """Get list of unique COM port numbers used by real channels."""
@@ -105,6 +182,7 @@ class PSUChannel(Channel):
     ILIM = 'I_lim'
     CURRENT = 'Current'
     POWER = 'Power'
+    CONFIG = 'Config'
     channelParent: PSU
 
     def getDefaultChannel(self) -> dict[str, dict]:
@@ -114,10 +192,12 @@ class PSUChannel(Channel):
         self.ilim: float
         self.current: float
         self.power: float
+        self.configuration: str
 
+        configItems, configDefault = mergedConfigItems()
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = 'Voltage (V)'
-        channel[self.MONITOR][Parameter.HEADER] = 'U (V)'  # voltage readback; device unit is mA (plotted currents)
+        channel[self.MONITOR][Parameter.HEADER] = 'Measured U (V)'  # voltage readback; device unit is mA (plotted currents)
         channel[self.COM] = parameterDict(value=getComPort('PSU1', default=15), minimum=1, maximum=99, parameterType=PARAMETERTYPE.INT, advanced=True,
                                           header='COM', toolTip='COM port number of the supply (PSU1-4 = 15-18).', attr='com')
         channel[self.POLARITY] = parameterDict(value='POS', parameterType=PARAMETERTYPE.COMBO, items='POS, NEG', advanced=False, header='Out',
@@ -129,15 +209,25 @@ class PSUChannel(Channel):
                                               toolTip='Measured output current (read-only). This is what the plot and the recorded data show.')
         channel[self.POWER] = parameterDict(value=0.0, parameterType=PARAMETERTYPE.FLOAT, advanced=False, header='P (W)', indicator=True, attr='power',
                                             toolTip='Measured output power V*I (read-only). CGC limit: < 100 W per switch channel.')
+        channel[self.CONFIG] = parameterDict(value=configDefault, parameterType=PARAMETERTYPE.COMBO, items=', '.join(configItems), fixedItems=True,
+                                             advanced=False, header='Config', attr='configuration', event=self.configChanged,
+                                             toolTip='NVM config of this supply (index: name), mirrored between its POS and NEG row.\n'
+                                                     'Loaded on On (then the channel voltages + I_lims are applied on top); selecting while On '
+                                                     'loads it immediately the same way. List refreshes from the device NVM at every initialization.')
         return channel
 
     def setDisplayedParameters(self) -> None:
         super().setDisplayedParameters()
+        self.insertDisplayedParameter(self.CONFIG, before=self.DISPLAY)
         self.insertDisplayedParameter(self.ILIM, before=self.DISPLAY)
         self.insertDisplayedParameter(self.CURRENT, before=self.DISPLAY)
         self.insertDisplayedParameter(self.POWER, before=self.DISPLAY)
         self.displayedParameters.append(self.POLARITY)
         self.displayedParameters.append(self.COM)
+
+    def configChanged(self) -> None:
+        """Hand the user's Config selection to the device for mirroring and (if On) live-apply."""
+        self.channelParent.onConfigSelected(self)
 
     def tempParameters(self) -> list[str]:
         return [*super().tempParameters(), self.CURRENT, self.POWER]
@@ -172,7 +262,7 @@ class PSUChannel(Channel):
                                 or (not self.channelParent.isOn() and abs(self.monitor - 0) > 2)))
 
     def realChanged(self) -> None:
-        for name in (self.COM, self.POLARITY, self.ILIM, self.CURRENT, self.POWER):
+        for name in (self.COM, self.POLARITY, self.ILIM, self.CURRENT, self.POWER, self.CONFIG):
             self.getParameterByName(name).setVisible(self.real)
         super().realChanged()
 
@@ -182,6 +272,12 @@ class PSUController(DeviceController):
 
     controllerParent: PSU
 
+    class SignalCommunicate(DeviceController.SignalCommunicate):
+        """Bundle pyqtSignals."""
+
+        configListsChangedSignal = pyqtSignal()
+        """Signal that transfers freshly enumerated NVM config lists from the init thread to the Config dropdowns."""
+
     def __init__(self, controllerParent: PSU) -> None:
         super().__init__(controllerParent=controllerParent)
         self.psus = {}  # COM port -> esibd_bs PSU instance
@@ -190,6 +286,8 @@ class PSUController(DeviceController):
         self.telemetryThrottle = ChannelThrottle()
         self.hkPushTimes = {}  # COM port -> last housekeeping push (epoch s)
         self.breachCounts = {}  # (COM, psu_num) -> consecutive soft-watchdog breaches
+        self.configLists = {}  # COM port -> list of 'index: name' NVM config items (None = enumeration failed)
+        self.signalComm.configListsChangedSignal.connect(self.updateConfigCombos)
         self.initCOMs()
 
     def _unitFor(self, com: int) -> tuple[str, int]:
@@ -237,6 +335,10 @@ class PSUController(DeviceController):
                     return
                 self.psus[com] = psu
                 self.print(f'{device_id} on COM{com} connected.')
+                self.configLists[com] = self._enumerateConfigs(psu, com)
+
+            # emitted before initCompleteSignal so the dropdowns are refreshed before initComplete can trigger the On bring-up
+            self.signalComm.configListsChangedSignal.emit()
 
             if self.controllerParent.isOn():
                 for com in self.psus:
@@ -266,20 +368,116 @@ class PSUController(DeviceController):
                     self.psus[com] = psu
         except Exception as e:  # noqa: BLE001
             self.print(f'Test Mode runs without telemetry devices: {e}', flag=PRINT.DEBUG)
+        # canned campaign slots — the sim never loads the vendor DLL, so real NVM enumeration is impossible
+        self.configLists = {com: list(TESTMODE_CONFIG_ITEMS) for com in self.COMs}
+        self.signalComm.configListsChangedSignal.emit()
         super().fakeInitialization()
 
+    def _enumerateConfigs(self, psu, com: int) -> 'list[str] | None':
+        """Read the populated NVM config slots (index + name) of one unit.
+
+        Returns None on failure so the dropdown keeps its last known list. Commas in
+        device-stored names are replaced (the COMBO items string is comma-separated).
+        """
+        try:
+            status, _active, valid = psu.call_with_retry(psu.get_config_list)
+            if status != psu.NO_ERR:
+                self.print(f'COM{com}: get_config_list failed (status {status}) — keeping the last known config list.', flag=PRINT.WARNING)
+                return None
+            items = []
+            for index, is_valid in enumerate(valid):
+                if not is_valid:
+                    continue
+                name_status, name = psu.get_config_name(index)
+                items.append(f'{index}: {name.replace(",", ";")}' if name_status == psu.NO_ERR and name else f'{index}: <unnamed>')
+        except Exception as e:  # noqa: BLE001
+            self.print(f'COM{com}: NVM enumeration failed: {e}', flag=PRINT.WARNING)
+            return None
+        return items or None
+
+    def updateConfigCombos(self) -> None:
+        """Replace the Config dropdown items with the freshly enumerated NVM lists (runs in the main thread).
+
+        Selections are re-matched by config index (a renamed slot updates silently); a
+        vanished index falls back to the baseline with a warning. Real enumerations
+        refresh the on-disk cache that seeds the dropdowns at the next start.
+        """
+        fresh = {com: items for com, items in self.configLists.items() if items}
+        if not fresh:
+            return
+        if not getTestMode():
+            cache = loadConfigCache()
+            cache.update({str(com): items for com, items in fresh.items()})
+            saveConfigCache(cache)
+        device = self.controllerParent
+        device.syncingConfig = True
+        try:
+            for channel in device.getChannels():
+                items = fresh.get(channel.com) if channel.real else None
+                if not items:
+                    continue
+                parameter = channel.getParameterByName(PSUChannel.CONFIG)
+                previous = str(parameter.value)
+                previousIndex = configIndex(previous)
+                parameter.combo.blockSignals(True)
+                parameter.combo.clear()
+                for item in items:
+                    parameter.combo.insertItem(parameter.combo.count(), item)
+                match = next((k for k, item in enumerate(items) if configIndex(item) == previousIndex), -1)
+                if match == -1:
+                    match = next((k for k, item in enumerate(items) if configIndex(item) == BASELINE_CONFIG), 0)
+                    self.print(f"{channel.name}: stored config '{previous}' not found in the NVM of COM{channel.com} — "
+                               f"falling back to '{items[match]}'.", flag=PRINT.WARNING)
+                parameter.combo.setCurrentIndex(match)
+                parameter.combo.blockSignals(False)
+        finally:
+            device.syncingConfig = False
+
+    def _selectedConfig(self, com: int) -> int:
+        """Return the config index selected for one unit (mirrored Config column; fallback: campaign baseline)."""
+        for channel in self.controllerParent.getChannels():
+            if channel.real and channel.com == com:
+                index = configIndex(channel.configuration)
+                if index is not None:
+                    return index
+                break
+        return BASELINE_CONFIG
+
+    def applyConfigFromThread(self, com: int) -> None:
+        """Load the selected config on one unit and re-apply its channel values (thread safe)."""
+        if not getTestMode() and self.initialized:
+            threading.Thread(target=self.applyConfig, args=(com,), name=f'{self.controllerParent.name} applyConfigThread', daemon=True).start()
+
+    def applyConfig(self, com: int) -> None:
+        """Live config change for one unit — same sequence as the On bring-up.
+
+        Design choice 2026-07-07 (Option A): load_current_config, enables from the E
+        checkboxes, then re-apply every channel's V + I_lim — the channel table stays
+        the voltage truth.
+        """
+        with self.lock.acquire_timeout(2, timeoutMessage=f'Cannot acquire lock to load config on COM{com}.') as lock_acquired:
+            if not lock_acquired:
+                return
+            self._bringUp(com)
+        time.sleep(0.2)
+        for channel in self.controllerParent.getChannels():
+            if channel.real and channel.com == com:
+                self.applyValueFromThread(channel)
+
     def _bringUp(self, com: int) -> None:
-        """Campaign bring-up for one unit: load the baseline NVM config (the full working
+        """Campaign bring-up for one unit: load its selected NVM config (the full working
         set incl. enables — bare enables arm nothing), then reflect the channel E
         checkboxes in the per-output enables. Caller must hold the controller lock or
         run before acquisition starts. Channel voltages/I_lims are re-applied by the caller."""
         psu = self.psus.get(com)
         if psu is None:
             return
-        status = psu.call_with_retry(psu.load_current_config, self.controllerParent.baselineConfig)
+        config = self._selectedConfig(com)
+        status = psu.call_with_retry(psu.load_current_config, config)
         if status != psu.NO_ERR:
-            self.print(f'Failed to load baseline config {self.controllerParent.baselineConfig} on COM{com}: status {status}', flag=PRINT.ERROR)
+            self.print(f'Failed to load config {config} on COM{com}: status {status}', flag=PRINT.ERROR)
             return
+        self.print(f'Loaded config {config} on COM{com}.')
         enables = {0: False, 1: False}
         for channel in self.controllerParent.getChannels():
             if channel.real and channel.com == com:
@@ -490,8 +688,9 @@ class PSUController(DeviceController):
             self.print('No connected units to purge.', flag=PRINT.WARNING)
 
     def listConfigs(self) -> None:
-        """List the populated NVM config slots (python index + device-stored name) of every unit in the Console."""
+        """List the populated NVM config slots (python index + device-stored name) of every unit in the Console and refresh the Config dropdowns."""
         def enumerate_configs() -> None:
+            changed = False
             for com, psu in self.psus.items():
                 if psu.test_mode:
                     self.print(f'COM{com}: NVM enumeration needs real hardware (Test Mode active). '
@@ -500,21 +699,16 @@ class PSUController(DeviceController):
                 with self.lock.acquire_timeout(5, timeoutMessage=f'Cannot acquire lock to read configs on COM{com}.') as lock_acquired:
                     if not lock_acquired:
                         continue
-                    try:
-                        status, _active, valid = psu.get_config_list()
-                        if status != psu.NO_ERR:
-                            self.print(f'COM{com}: get_config_list failed (status {status})', flag=PRINT.WARNING)
-                            continue
-                        found = 0
-                        for index, is_valid in enumerate(valid):
-                            if not is_valid:
-                                continue
-                            name_status, name = psu.get_config_name(index)
-                            self.print(f'COM{com} config {index}: {name if name_status == psu.NO_ERR else "<name read failed>"}')
-                            found += 1
-                        self.print(f'COM{com}: {found} populated NVM config slots.')
-                    except Exception as e:  # noqa: BLE001
-                        self.print(f'COM{com}: NVM enumeration failed: {e}', flag=PRINT.WARNING)
+                    items = self._enumerateConfigs(psu, com)
+                if items is None:
+                    continue
+                for item in items:
+                    self.print(f'COM{com} config {item}')
+                self.print(f'COM{com}: {len(items)} populated NVM config slots.')
+                self.configLists[com] = items
+                changed = True
+            if changed:
+                self.signalComm.configListsChangedSignal.emit()
         if self.psus:
             threading.Thread(target=enumerate_configs, name=f'{self.controllerParent.name} configListThread', daemon=True).start()
         else:

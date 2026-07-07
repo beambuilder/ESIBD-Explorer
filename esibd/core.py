@@ -214,8 +214,10 @@ class EsibdExplorer(QMainWindow):
         self.pluginManager.closePlugins()
         if restart:
             self.app.sharedAppStr.detach()
-            python = sys.executable
-            os.execl(python, python, *sys.argv)  # noqa: S606
+            # sys.argv[0] is the rewritten script path ('.../esibd/explorer.py') which is not importable
+            # as a script when started via 'python -m esibd.explorer' — sys.orig_argv preserves the real
+            # command line including the '-m' switch.
+            os.execl(sys.executable, *sys.orig_argv)  # noqa: S606
         return True
 
 
@@ -333,7 +335,7 @@ class PluginManager:  # noqa: PLR0904
 
         self.confParser = configparser.ConfigParser()
         if self.pluginFile.exists():
-            self.confParser.read(self.pluginFile)
+            self.confParser.read(self.pluginFile, encoding=UTF8)
         self.confParser[INFO] = infoDict('PluginManager')
 
         import esibd.provide_plugins  # pylint: disable = import-outside-toplevel  # avoid circular import  # noqa: PLC0415
@@ -643,7 +645,7 @@ class PluginManager:  # noqa: PLR0904
         lay.addWidget(buttonBox)
         confParser = configparser.ConfigParser()
         if self.pluginFile.exists():
-            confParser.read(self.pluginFile)
+            confParser.read(self.pluginFile, encoding=UTF8)
         confParser[INFO] = infoDict('PluginManager')
         for name, item in confParser.items():
             if name != Parameter.DEFAULT.upper() and name != INFO:
