@@ -22,6 +22,8 @@ HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, enable states) caden
 P_LIMIT_W = 100.0  # CGC dissipation limit per switch channel (campaign 2026-07-06: swB hit 98.8 W at the envelope top)
 V_MAX = 350.0  # absolute output ceiling (HV-PSU-CTRL-2D full range)
 UNIT_KEYS = ('PSU1', 'PSU2', 'PSU3', 'PSU4')  # canonical com_ports keys; dll device index = key number - 1 (notebook 025)
+SWITCH_FOR_UNIT = {'PSU1': 'SW', 'PSU2': 'SW', 'PSU3': 'SWHR', 'PSU4': 'SWHR'}  # notebook-023 wiring: psu1/2 feed swB (SW plugin), psu3/4 feed swA (SWHR plugin)
+PAIR_LABELS = {'SW': ('PSU1/2', 'swB'), 'SWHR': ('PSU3/4', 'swA')}  # pair button per switch: (unit pair, switch name)
 BASELINE_CONFIG = 63  # campaign baseline NVM slot: 10 V / 100 mA, all enables on
 STANDBY_CONFIG = 0  # park slot: everything off
 CONFIG_CACHE_FILE = 'psu_nvm_configs.json'  # last known NVM lists per COM, seeds the Config dropdowns before enumeration
@@ -91,12 +93,21 @@ class PSU(Device):
     stays as the monitor (deviation warning).
 
     On loads each unit's selected NVM config (Config column, mirrored across the two
-    rows of one supply; fresh channels default to 63 = 10 V / 100 mA, all enables on —
-    campaign-proven bring-up; bare enables arm nothing) and then re-applies every
-    channel's voltage + current limit; Off parks the units in standby config 0.
-    Selecting a config while On loads it immediately, sets the enables from the E
-    checkboxes and re-applies the channel values — the channel table stays the voltage
-    truth (design choice 2026-07-07, see the KB cgc-psu page for the alternatives).
+    rows of one supply; fresh channels default to 63 = 10 V / 100 mA — campaign-proven
+    bring-up; bare enables arm nothing) and then re-applies every channel's voltage +
+    current limit; Off parks the units in standby config 0. Selecting a config while On
+    loads it immediately and re-applies the channel values — the channel table stays
+    the voltage truth (design choice 2026-07-07, see the KB cgc-psu page for the
+    alternatives).
+
+    OUTPUTS ARM ONLY THROUGH THE PAIR BUTTONS (user 2026-07-07): On/config loads leave
+    every output disabled. The toolbar carries one enable button per PSU pair —
+    PSU1/2 (feeds swB) and PSU3/4 (feeds swA) — and each arms only while its switch
+    plugin reports isRunning() (On and not in standby config): PSUs must never feed a
+    parked switch. Within an armed pair the E checkboxes still select the rails.
+    The buttons start disarmed every session and snap off with Off; the interlock is
+    checked at enable time only (a switch parked afterwards does NOT auto-disable the
+    pair — disarm first, campaign teardown order: PSUs before switch).
     The dropdown lists 'index: name' read from the device NVM at every initialization
     (cached between sessions so saved selections survive the restart).
     A soft watchdog on the readback enforces the campaign limits (per-channel I_lim,
@@ -128,13 +139,54 @@ class PSU(Device):
         super().__init__(**kwargs)
         self.channelType = PSUChannel
         self.syncingConfig = False  # guards the Config-mirroring event against recursion and programmatic updates
+        self.enablePairActions = {}  # switch plugin name -> pair-enable StateAction (filled in initGUI)
 
     def initGUI(self) -> None:
         super().initGUI()
         self.addAction(event=lambda: self.controller.purgeUnits(), toolTip=f'Purge the COM buffers of all connected {self.name} units.', icon='purge.png')
         self.addAction(event=lambda: self.controller.listConfigs(), toolTip='List the NVM config slots (index + name) of all connected units in the Console.',
                        icon='configs.png')
+        # restore=False: outputs must never arm from a restored GUI state — every session starts disarmed
+        self.enablePairActions = {}
+        for switchName, (pairLabel, switchLabel) in PAIR_LABELS.items():
+            self.enablePairActions[switchName] = self.addStateAction(
+                event=lambda sn=switchName: self.togglePairEnable(sn), restore=False,
+                toolTipFalse=f'Enable the {pairLabel} outputs (interlocked: {switchLabel} must be running).',
+                iconFalse=self.makeIcon(f'enable_{switchLabel.lower()}_off.png'),
+                toolTipTrue=f'Disable the {pairLabel} outputs.',
+                iconTrue=self.makeIcon(f'enable_{switchLabel.lower()}_on.png'))
         self.controller = PSUController(controllerParent=self)
+
+    def togglePairEnable(self, switchName: str) -> None:
+        """Arm or disarm the outputs of one PSU pair; arming is interlocked on the feeding switch (user 2026-07-07).
+
+        A pair may only be armed while its switch plugin reports isRunning() — On and not
+        in the standby configuration (PSUs must never feed a parked switch). Disarming is
+        always allowed. These buttons are the ONLY path that arms outputs: On/config
+        loads leave the outputs off (see PSUController._applyEnables).
+        """
+        pairLabel, switchLabel = PAIR_LABELS[switchName]
+        action = self.enablePairActions[switchName]
+        if action.state:  # arming — check the interlock; snapping the state back does not re-fire this event
+            if not (self.isOn() and self.controller.initialized):
+                action.state = False
+                self.print(f'Turn {self.name} on before enabling the {pairLabel} outputs.', flag=PRINT.WARNING)
+                return
+            switchPlugin = getattr(self.pluginManager, switchName, None)
+            # getattr guard: a foreign plugin without the isRunning API must read as 'not running'
+            if switchPlugin is None or not getattr(switchPlugin, 'isRunning', lambda: False)():
+                action.state = False
+                self.print(f'{pairLabel} outputs stay off: {switchLabel} is not running '
+                           f'(the {switchName} plugin must be loaded, On and not in standby config).', flag=PRINT.WARNING)
+                return
+        self.controller.applyPairEnablesFromThread(switchName)
+
+    def setOn(self, on: 'bool | None' = None) -> None:  # noqa: D102
+        super().setOn(on)
+        if hasattr(self, 'enablePairActions') and not self.isOn():
+            # Off parks every unit (standby disables all outputs) — the pair buttons follow so the GUI stays truthful
+            for action in self.enablePairActions.values():
+                action.state = False
 
     def getChannels(self) -> 'list[PSUChannel]':
         return cast('list[PSUChannel]', super().getChannels())
@@ -466,9 +518,9 @@ class PSUController(DeviceController):
 
     def _bringUp(self, com: int) -> None:
         """Campaign bring-up for one unit: load its selected NVM config (the full working
-        set incl. enables — bare enables arm nothing), then reflect the channel E
-        checkboxes in the per-output enables. Caller must hold the controller lock or
-        run before acquisition starts. Channel voltages/I_lims are re-applied by the caller."""
+        set incl. enables — bare enables arm nothing), then write the gated per-output
+        enables. Caller must hold the controller lock or run before acquisition starts.
+        Channel voltages/I_lims are re-applied by the caller."""
         psu = self.psus.get(com)
         if psu is None:
             return
@@ -478,14 +530,45 @@ class PSUController(DeviceController):
             self.print(f'Failed to load config {config} on COM{com}: status {status}', flag=PRINT.ERROR)
             return
         self.print(f'Loaded config {config} on COM{com}.')
+        self._applyEnables(com, psu)
+
+    def pairArmed(self, com: int) -> bool:
+        """Return True if the pair button covering this unit is armed (units outside the four known PSUs belong to no pair and never arm)."""
+        device_id, _ = self._unitFor(com)
+        action = self.controllerParent.enablePairActions.get(SWITCH_FOR_UNIT.get(device_id, ''))
+        return bool(action and action.state)
+
+    def _applyEnables(self, com: int, psu) -> None:
+        """Write the per-output enables of one unit: E checkbox AND armed pair button.
+
+        The pair buttons are the only path that arms outputs (switch interlock, user
+        2026-07-07) — a config load alone leaves the outputs off. Caller must hold the
+        controller lock."""
+        armed = self.pairArmed(com)
         enables = {0: False, 1: False}
         for channel in self.controllerParent.getChannels():
             if channel.real and channel.com == com:
-                enables[channel.psu_num] = enables[channel.psu_num] or channel.enabled
+                enables[channel.psu_num] = enables[channel.psu_num] or (channel.enabled and armed)
         status = psu.call_with_retry(psu.set_psu_enable, enables[0], enables[1])
         if status != psu.NO_ERR:
             self.print(f'Failed to set output enables on COM{com}: status {status}', flag=PRINT.WARNING)
         self.hkPushTimes[com] = 0.0  # next read cycle pushes the new enable state to telemetry right away
+
+    def applyPairEnablesFromThread(self, switchName: str) -> None:
+        """Write the freshly gated output enables of every unit of one pair (thread safe; pair button event)."""
+        if getTestMode() or not self.initialized:
+            return
+        threading.Thread(target=self.applyPairEnables, args=(switchName,), name=f'{self.controllerParent.name} pairEnableThread', daemon=True).start()
+
+    def applyPairEnables(self, switchName: str) -> None:
+        """Arm or disarm the outputs of one pair's units (E checkbox AND pair button state)."""
+        for com, psu in self.psus.items():
+            device_id, _ = self._unitFor(com)
+            if SWITCH_FOR_UNIT.get(device_id) != switchName:
+                continue
+            with self.lock.acquire_timeout(2, timeoutMessage=f'Cannot acquire lock to set the output enables on COM{com}.') as lock_acquired:
+                if lock_acquired:
+                    self._applyEnables(com, psu)
 
     def _standby(self, com: int) -> None:
         """Campaign teardown for one unit: outputs to 0 V, then park in standby config 0."""
