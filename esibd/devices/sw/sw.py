@@ -19,6 +19,14 @@ def providePlugins() -> 'list[type[Plugin]]':
 
 
 HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, enable state) cadence; frequency telemetry stays on ChannelThrottle
+# CONFIG-ONLY TEST MODE (user, 2026-07-07 real-HW round 3): frequency/duty register
+# writes are disabled — On + the Config dropdown drive the switch via NVM working sets
+# only. Reason: right after load_current_config(89) the device RUNS the config, but
+# get_pulser_delay(0) read 0 where the NVM stores 7 — set_rf's stuck-HIGH validation
+# then refuses every move. Until that readback-after-load behavior is understood
+# (device settle time? CTS busy?), flip APPLY_RF to True to re-enable the set_rf path
+# (value/duty edits + re-apply after On). All the machinery below stays functional.
+APPLY_RF = False
 F_MAX_KHZ = 1000.0  # proven envelope top (campaign 2026-07-06: swB open to 1 MHz at 350 V within the CGC limits)
 BASELINE_CONFIG = 89  # campaign baseline NVM slot: SwitchSym 1 MHz working set, 023-proven
 STANDBY_CONFIG = 0  # park slot: everything off
@@ -103,6 +111,11 @@ class SW(Device):
     Safety (CGC, binding): ramp VOLTAGE at 1 kHz first, then frequency at full voltage
     — the voltage lives in the PSU plugin, so mind the order across plugins. The PSU
     soft watchdog (300 mA for Q1 / 150 mA elsewhere, 100 W) catches over-current.
+
+    CONFIG-ONLY TEST MODE is currently active (module flag APPLY_RF, 2026-07-07):
+    the frequency/duty columns are NOT written to the device — On and the Config
+    dropdown drive the switch purely via its NVM working sets while the
+    register-readback-after-load behavior is investigated at the bench.
 
     swB sensor 0 is broken and never logged. Never run this plugin and a switch
     notebook at the same time — same COM port.
@@ -214,6 +227,11 @@ class RFChannel(Channel):
         self.channelParent.onConfigSelected(self)
 
     def monitorChanged(self) -> None:
+        # Config-only test mode: the monitor shows the loaded config's frequency and the
+        # value is not written — a deviation warning would be permanently red noise.
+        if not APPLY_RF:
+            self.updateWarningState(False)
+            return
         # Only meaningful while On: parked (standby config) the oscillator register holds
         # whatever the config left there — comparing it to 0 or to the setpoint is noise.
         # Tolerance: the period register quantizes to ~1 percent at the 1 MHz end.
@@ -396,7 +414,7 @@ class SWController(DeviceController):
             if not lock_acquired:
                 return
             armed = self._bringUp()
-        if not armed:
+        if not (armed and APPLY_RF):
             return
         time.sleep(0.2)
         for channel in self.controllerParent.getChannels():
@@ -414,7 +432,7 @@ class SWController(DeviceController):
         config = self._selectedConfig()
         status = self.sw.call_with_retry(self.sw.load_current_config, config)
         if status != self.sw.NO_ERR:
-            self.print(f'Failed to load config {config} on the switch: status {status} — channel values NOT applied.', flag=PRINT.ERROR)
+            self.print(f'Failed to load config {config} on the switch: status {status}.', flag=PRINT.ERROR)
             return False
         self.print(f'Loaded config {config} on the switch.')
         self.hkPushTime = 0.0  # next read cycle pushes the new enable state to telemetry right away
@@ -469,6 +487,9 @@ class SWController(DeviceController):
             self.print(f'Housekeeping push failed: {e}', flag=PRINT.DEBUG)
 
     def applyValue(self, channel: RFChannel) -> None:
+        if not APPLY_RF:
+            self.print(f'Config-only test mode: not writing {channel.value:g} kHz — drive the switch via the Config dropdown.', flag=PRINT.TRACE)
+            return
         if self.sw is None or not (channel.enabled and self.controllerParent.isOn()):
             return  # parked = standby config; there is no '0 kHz' to write (contrast: PSU writes 0 V)
         frequency = max(1.0, min(float(channel.value), F_MAX_KHZ))
@@ -557,7 +578,7 @@ class SWController(DeviceController):
                     self._standby()
         except Exception as e:  # noqa: BLE001
             self.print(f'Error toggling the switch: {e}', flag=PRINT.ERROR)
-        if on and armed:
+        if on and armed and APPLY_RF:
             # Give the device a moment to settle before pushing the channel frequency over the config values.
             time.sleep(0.2)
             for channel in self.controllerParent.getChannels():
