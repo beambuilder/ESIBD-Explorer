@@ -5,7 +5,8 @@ import time
 from typing import cast
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QSpinBox
 
 from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, getTestMode, getValidConfigPath, parameterDict
 from esibd.devices.com_helper import getComPort
@@ -19,14 +20,7 @@ def providePlugins() -> 'list[type[Plugin]]':
 
 
 HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, enable state) cadence; frequency telemetry stays on ChannelThrottle
-# CONFIG-ONLY TEST MODE (user, 2026-07-07 real-HW round 3): frequency/duty register
-# writes are disabled — On + the Config dropdown drive the switch via NVM working sets
-# only. Reason: right after load_current_config(89) the device RUNS the config, but
-# get_pulser_delay(0) read 0 where the NVM stores 7 — set_rf's stuck-HIGH validation
-# then refuses every move. Until that readback-after-load behavior is understood
-# (device settle time? CTS busy?), flip APPLY_RF to True to re-enable the set_rf path
-# (value/duty edits + re-apply after On). All the machinery below stays functional.
-APPLY_RF = False
+NVM_SETTLE_S = 2  # NVM writes (save slot, set name) signal busy via CTS — no traffic during this window
 F_MAX_KHZ = 1000.0  # proven envelope top (campaign 2026-07-06: swB open to 1 MHz at 350 V within the CGC limits)
 BASELINE_CONFIG = 89  # campaign baseline NVM slot: SwitchSym 1 MHz working set, 023-proven
 STANDBY_CONFIG = 0  # park slot: everything off
@@ -102,20 +96,23 @@ class SW(Device):
     (DC on the load). The monoflop rule is validated before anything is written.
 
     On loads the selected NVM config (Config column; fresh channels default to 89 =
-    SwitchSym 1 MHz, the campaign baseline working set — bare enables arm nothing) and
-    then re-applies the channel frequency/duty; Off parks the switch in standby config
-    0. Selecting a config while On loads it immediately the same way (same design
-    choice as the PSU plugin, see the KB cgc-psu page). The dropdown lists 'index:
-    name' read from the device NVM at every initialization (cached between sessions).
+    SwitchSym 1 MHz, the campaign baseline working set — bare enables arm nothing);
+    Off parks the switch in standby config 0. Selecting a config while On loads it
+    immediately. CONFIG IS THE TRUTH (user decision 2026-07-07, opposite of the PSU
+    plugin): after every config load the frequency/duty INPUTS sync to what the loaded
+    working set actually contains — the channel values are never pushed onto a freshly
+    loaded config. Editing frequency or duty afterwards writes to the device via the
+    campaign move. The dropdown lists 'index: name' read from the device NVM at every
+    initialization (cached between sessions).
+
+    The save toolbar action stores the CURRENT working set (including manual
+    frequency/duty edits) into a chosen NVM slot with a name — build a recipe per
+    ion/molecule once, reload it from the dropdown forever. Slot 0 (standby) is
+    protected.
 
     Safety (CGC, binding): ramp VOLTAGE at 1 kHz first, then frequency at full voltage
     — the voltage lives in the PSU plugin, so mind the order across plugins. The PSU
     soft watchdog (300 mA for Q1 / 150 mA elsewhere, 100 W) catches over-current.
-
-    CONFIG-ONLY TEST MODE is currently active (module flag APPLY_RF, 2026-07-07):
-    the frequency/duty columns are NOT written to the device — On and the Config
-    dropdown drive the switch purely via its NVM working sets while the
-    register-readback-after-load behavior is investigated at the bench.
 
     swB sensor 0 is broken and never logged. Never run this plugin and a switch
     notebook at the same time — same COM port.
@@ -141,7 +138,42 @@ class SW(Device):
         self.addAction(event=lambda: self.controller.purgeUnit(), toolTip=f'Purge the COM buffers of the {self.name} controller.', icon='purge.png')
         self.addAction(event=lambda: self.controller.listConfigs(), toolTip='List the NVM config slots (index + name) of the switch in the Console.',
                        icon='configs.png')
+        self.addAction(event=lambda: self.saveConfigDialog(), toolTip='Save the CURRENT working set (incl. manual frequency/duty edits) to an NVM config slot.',
+                       icon='saveconfig.png')
         self.controller = SWController(controllerParent=self)
+
+    def saveConfigDialog(self) -> None:
+        """Ask for slot number + name, then store the current working set in the switch NVM (user request 2026-07-07)."""
+        if not self.controller.initialized or self.controller.sw is None:
+            self.print('Initialize communication first — the save action stores the LIVE working set of the switch.', flag=PRINT.WARNING)
+            return
+        items = self.controller.configItems or []
+        occupants = {configIndex(item): item for item in items}
+        dialog = QDialog(self, Qt.WindowType.WindowStaysOnTopHint)
+        dialog.setWindowTitle('Save working set to NVM config')
+        layout = QFormLayout(dialog)
+        slotBox = QSpinBox()
+        slotBox.setRange(1, 125)  # slot 0 = Standby, protected (campaign teardown depends on it)
+        used = {index for index in occupants if index is not None}
+        slotBox.setValue(next((i for i in range(100, 126) if i not in used), 119))  # suggest a free slot in the user range
+        nameEdit = QLineEdit()
+        nameEdit.setMaxLength(52)  # ED NVM name limit
+        nameEdit.setPlaceholderText('e.g. Reserpine_2kHz_50pct')
+        occupantLabel = QLabel()
+
+        def updateOccupant() -> None:
+            occupantLabel.setText(f"overwrites: '{occupants[slotBox.value()]}'" if slotBox.value() in occupants else 'slot is free')
+        slotBox.valueChanged.connect(updateOccupant)
+        updateOccupant()
+        layout.addRow('Slot (python index)', slotBox)
+        layout.addRow('Name', nameEdit)
+        layout.addRow('', occupantLabel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec():
+            self.controller.saveWorkingSet(slotBox.value(), nameEdit.text().strip())
 
     def getChannels(self) -> 'list[RFChannel]':
         return cast('list[RFChannel]', super().getChannels())
@@ -219,6 +251,8 @@ class RFChannel(Channel):
 
     def dutyChanged(self) -> None:
         """Re-apply the channel while On so a duty edit takes effect immediately (frequency edits go through the normal value path)."""
+        if self.channelParent.controller.syncing:
+            return  # duty came from the loaded config — never push it back
         if self.real and self.channelParent.isOn():
             self.channelParent.controller.applyValueFromThread(self)
 
@@ -227,13 +261,10 @@ class RFChannel(Channel):
         self.channelParent.onConfigSelected(self)
 
     def monitorChanged(self) -> None:
-        # Config-only test mode: the monitor shows the loaded config's frequency and the
-        # value is not written — a deviation warning would be permanently red noise.
-        if not APPLY_RF:
-            self.updateWarningState(False)
-            return
         # Only meaningful while On: parked (standby config) the oscillator register holds
         # whatever the config left there — comparing it to 0 or to the setpoint is noise.
+        # After a config load the value input syncs FROM the device, so monitor == value
+        # except for genuine drift or an out-of-range (HF) config beyond the input clamp.
         # Tolerance: the period register quantizes to ~1 percent at the 1 MHz end.
         self.updateWarningState(self.enabled and self.channelParent.controller.acquiring and self.channelParent.isOn()
                                 and abs(self.monitor - self.value) > max(2, 0.02 * self.value))
@@ -254,6 +285,8 @@ class SWController(DeviceController):
 
         configListsChangedSignal = pyqtSignal()
         """Signal that transfers the freshly enumerated NVM config list from the init thread to the Config dropdowns."""
+        workingSetSyncSignal = pyqtSignal(float, object)
+        """Signal that transfers the loaded working set (f_khz, {pulser: duty}) from the worker thread to the channel inputs."""
 
     def __init__(self, controllerParent: SW) -> None:
         super().__init__(controllerParent=controllerParent)
@@ -261,7 +294,9 @@ class SWController(DeviceController):
         self.telemetryThrottle = ChannelThrottle()
         self.hkPushTime = 0.0  # last housekeeping push (epoch s)
         self.configItems = None  # list of 'index: name' NVM config items (None = not enumerated yet / failed)
+        self.syncing = False  # True while syncInputs writes the channel inputs — suppresses the apply events they fire
         self.signalComm.configListsChangedSignal.connect(self.updateConfigCombos)
+        self.signalComm.workingSetSyncSignal.connect(self.syncInputs)
 
     def initializeValues(self, reset: bool = False) -> None:  # noqa: ARG002
         """Initialize values array: one entry per channel for the frequency readback."""
@@ -303,8 +338,8 @@ class SWController(DeviceController):
 
             if self.controllerParent.isOn():
                 with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock for the initial bring-up.') as lock_acquired:
-                    if lock_acquired:
-                        self._bringUp()
+                    if lock_acquired and self._bringUp():
+                        self._emitWorkingSet()
                 time.sleep(0.2)
 
             self.signalComm.initCompleteSignal.emit()
@@ -409,17 +444,81 @@ class SWController(DeviceController):
             threading.Thread(target=self.applyConfig, name=f'{self.controllerParent.name} applyConfigThread', daemon=True).start()
 
     def applyConfig(self) -> None:
-        """Live config change — same sequence as the On bring-up (load, then re-apply frequency/duty on top)."""
+        """Live config change: load the working set, then sync the frequency/duty INPUTS to it (config is the truth)."""
         with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock to load the switch config.') as lock_acquired:
             if not lock_acquired:
                 return
-            armed = self._bringUp()
-        if not (armed and APPLY_RF):
+            if self._bringUp():
+                self._emitWorkingSet()
+
+    def _emitWorkingSet(self) -> None:
+        """Read the live working set and hand it to the main thread for the input sync. Caller must hold the controller lock."""
+        if self.sw is None:
             return
-        time.sleep(0.2)
-        for channel in self.controllerParent.getChannels():
-            if channel.real:
-                self.applyValueFromThread(channel)
+        status, period = self.sw.call_with_retry(self.sw.get_oscillator_period)
+        if status != self.sw.NO_ERR or period <= 0:
+            return  # standby or failed read — nothing meaningful to sync
+        frequency_khz = self.sw.CLOCK / (period + self.sw.OSC_OFFSET) / 1000.0
+        duties = {}
+        for pulser in {channel.pulser for channel in self.controllerParent.getChannels() if channel.real}:
+            width_status, width = self.sw.call_with_retry(self.sw.get_pulser_width, pulser)
+            if width_status == self.sw.NO_ERR:
+                duties[pulser] = (width + self.sw.PULSER_WIDTH_OFFSET) / (period + self.sw.OSC_OFFSET)
+        self.signalComm.workingSetSyncSignal.emit(frequency_khz, duties)
+
+    def syncInputs(self, frequency_khz: float, duties: dict) -> None:
+        """Write the loaded working set into the frequency/duty inputs (runs in the main thread).
+
+        Config is the truth (user 2026-07-07): the inputs follow the loaded config, never the
+        other way around. lastAppliedValue is set alongside so the framework's change detection
+        does not push the synced value back to the device; self.syncing suppresses the events.
+        Values are clamped to the input ranges — an HF config beyond 1 MHz shows clamped inputs
+        (the monitor still shows the real frequency and flags the mismatch).
+        """
+        self.syncing = True
+        try:
+            for channel in self.controllerParent.getChannels():
+                if not channel.real:
+                    continue
+                value = round(max(1.0, min(frequency_khz, F_MAX_KHZ)), 3)
+                channel.lastAppliedValue = value  # BEFORE the value event fires, so applyValue sees no change
+                channel.getParameterByName(RFChannel.VALUE).value = value
+                duty = duties.get(channel.pulser)
+                if duty is not None:
+                    channel.getParameterByName(RFChannel.DUTY).value = round(max(1.0, min(duty * 100.0, 99.0)), 2)
+        finally:
+            self.syncing = False
+
+    def saveWorkingSet(self, slot: int, name: str) -> None:
+        """Store the CURRENT working set in NVM slot + name it, then refresh the dropdown (thread safe, user 2026-07-07)."""
+        def save() -> None:
+            with self.lock.acquire_timeout(10, timeoutMessage=f'Cannot acquire lock to save config {slot}.') as lock_acquired:
+                if not lock_acquired:
+                    return
+                status = self.sw.call_with_retry(self.sw.save_current_config, slot)
+                if status != self.sw.NO_ERR:
+                    self.print(f'Failed to save the working set to slot {slot}: status {status}', flag=PRINT.ERROR)
+                    return
+                time.sleep(NVM_SETTLE_S)  # NVM write, CTS busy — no traffic until settled
+                if self.sw.test_mode:
+                    self.configItems = [item for item in (self.configItems or []) if configIndex(item) != slot]
+                    self.configItems.append(f'{slot}: {name or "<unnamed>"}')
+                    self.configItems.sort(key=lambda item: configIndex(item) or 0)
+                else:
+                    if name:
+                        name_status = self.sw.call_with_retry(self.sw.set_config_name, slot, name)
+                        if name_status != self.sw.NO_ERR:
+                            self.print(f'Config saved, but naming slot {slot} failed: status {name_status}', flag=PRINT.WARNING)
+                        time.sleep(NVM_SETTLE_S)
+                    items = self._enumerateConfigs(self.sw)
+                    if items:
+                        self.configItems = items
+                self.print(f"Working set saved to NVM slot {slot} ('{name or '<unnamed>'}').")
+            self.signalComm.configListsChangedSignal.emit()
+        if self.sw is not None:
+            threading.Thread(target=save, name=f'{self.controllerParent.name} saveConfigThread', daemon=True).start()
+        else:
+            self.print('Switch not connected.', flag=PRINT.WARNING)
 
     def _bringUp(self) -> bool:
         """Campaign bring-up: load the selected NVM config — the FULL working set (device/
@@ -487,9 +586,8 @@ class SWController(DeviceController):
             self.print(f'Housekeeping push failed: {e}', flag=PRINT.DEBUG)
 
     def applyValue(self, channel: RFChannel) -> None:
-        if not APPLY_RF:
-            self.print(f'Config-only test mode: not writing {channel.value:g} kHz — drive the switch via the Config dropdown.', flag=PRINT.TRACE)
-            return
+        if self.syncing:
+            return  # input sync after a config load — the values CAME from the device, never push them back
         if self.sw is None or not (channel.enabled and self.controllerParent.isOn()):
             return  # parked = standby config; there is no '0 kHz' to write (contrast: PSU writes 0 V)
         frequency = max(1.0, min(float(channel.value), F_MAX_KHZ))
@@ -565,7 +663,6 @@ class SWController(DeviceController):
         if self.sw is None:
             return
         on = self.controllerParent.isOn()
-        armed = False
         try:
             # Every DLL call must hold the controller lock — an unlocked call garbles the
             # in-flight exchange of the locked read/set threads (-13 storms, 2026-07-05/06).
@@ -573,17 +670,14 @@ class SWController(DeviceController):
                 if not lock_acquired:
                     return
                 if on:
-                    armed = self._bringUp()
+                    # Config is the truth: arm the working set, then sync the inputs to it.
+                    # The channel values are NEVER pushed onto a freshly loaded config.
+                    if self._bringUp():
+                        self._emitWorkingSet()
                 else:
                     self._standby()
         except Exception as e:  # noqa: BLE001
             self.print(f'Error toggling the switch: {e}', flag=PRINT.ERROR)
-        if on and armed and APPLY_RF:
-            # Give the device a moment to settle before pushing the channel frequency over the config values.
-            time.sleep(0.2)
-            for channel in self.controllerParent.getChannels():
-                if channel.real:
-                    self.applyValueFromThread(channel)
 
     def purgeUnit(self) -> None:
         """Manual COM-buffer purge (recovery from EMI serial hiccups under HV switching; user button)."""
