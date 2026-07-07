@@ -395,25 +395,30 @@ class SWController(DeviceController):
         with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock to load the switch config.') as lock_acquired:
             if not lock_acquired:
                 return
-            self._bringUp()
+            armed = self._bringUp()
+        if not armed:
+            return
         time.sleep(0.2)
         for channel in self.controllerParent.getChannels():
             if channel.real:
                 self.applyValueFromThread(channel)
 
-    def _bringUp(self) -> None:
+    def _bringUp(self) -> bool:
         """Campaign bring-up: load the selected NVM config — the FULL working set (device/
         oscillator/pulser enables + trigger routing); bare enables arm nothing. Caller
-        must hold the controller lock. The channel frequency/duty is re-applied by the caller."""
+        must hold the controller lock. Returns True when the config is armed; the channel
+        frequency/duty is re-applied by the caller ONLY then — set_rf into the standby
+        working set (pulser delay 0) is rejected as a stuck-HIGH risk."""
         if self.sw is None:
-            return
+            return False
         config = self._selectedConfig()
         status = self.sw.call_with_retry(self.sw.load_current_config, config)
         if status != self.sw.NO_ERR:
-            self.print(f'Failed to load config {config} on the switch: status {status}', flag=PRINT.ERROR)
-            return
+            self.print(f'Failed to load config {config} on the switch: status {status} — channel values NOT applied.', flag=PRINT.ERROR)
+            return False
         self.print(f'Loaded config {config} on the switch.')
         self.hkPushTime = 0.0  # next read cycle pushes the new enable state to telemetry right away
+        return True
 
     def _standby(self) -> None:
         """Campaign teardown: park the switch in standby config 0 (loads the all-off working set)."""
@@ -474,10 +479,23 @@ class SWController(DeviceController):
                 # lock are independent, so holding both here is safe.
                 status = self.sw.set_rf(frequency, duty=channel.duty / 100.0, pulser=channel.pulser)
                 if status != self.sw.NO_ERR:
-                    self.print(f'Error setting {channel.name} to {frequency:g} kHz at {channel.duty:g} percent duty: status {status}', flag=PRINT.WARNING)
+                    self.print(f'Error setting {channel.name} to {frequency:g} kHz at {channel.duty:g} percent duty: '
+                               f'status {status}{self._setRfHint(status, channel)}', flag=PRINT.WARNING)
                     self.errorCount += 1
                 else:
                     self.print(f'Set {channel.name} to {frequency:g} kHz at {channel.duty:g} percent duty (pulser {channel.pulser})', flag=PRINT.TRACE)
+
+    def _setRfHint(self, status: int, channel: RFChannel) -> str:
+        """Human-readable reason for a rejected set_rf — its validation logs land in the
+        esibd_bs logger, invisible in the Explorer Console (real-HW round 2, 2026-07-07)."""
+        if self.sw is None or status != self.sw.ERR_ARGUMENT:
+            return ''
+        d_status, delay = self.sw.call_with_retry(self.sw.get_pulser_delay, channel.pulser)
+        if d_status == self.sw.NO_ERR and delay == 0:
+            return (f' — pulser {channel.pulser} delay register is 0 (standby working set): the switch is not armed. '
+                    'Load an RF config first (toggle On / select a Config).')
+        return (' — set_rf validation rejected the move (monoflop rule: this duty does not fit this frequency '
+                f'at the current pulser delay {delay}).')
 
     def readNumbers(self) -> None:
         """Read the oscillator period and derive the frequency readback for every real channel (one oscillator)."""
@@ -526,6 +544,7 @@ class SWController(DeviceController):
         if self.sw is None:
             return
         on = self.controllerParent.isOn()
+        armed = False
         try:
             # Every DLL call must hold the controller lock — an unlocked call garbles the
             # in-flight exchange of the locked read/set threads (-13 storms, 2026-07-05/06).
@@ -533,12 +552,12 @@ class SWController(DeviceController):
                 if not lock_acquired:
                     return
                 if on:
-                    self._bringUp()
+                    armed = self._bringUp()
                 else:
                     self._standby()
         except Exception as e:  # noqa: BLE001
             self.print(f'Error toggling the switch: {e}', flag=PRINT.ERROR)
-        if on:
+        if on and armed:
             # Give the device a moment to settle before pushing the channel frequency over the config values.
             time.sleep(0.2)
             for channel in self.controllerParent.getChannels():
