@@ -24,7 +24,9 @@ class DMMR8(Device):
 
     Reads ion currents from up to 5 DPA-1F modules connected to a single
     DMMR-8 controller via serial (COM) port. Uses automatic current mode
-    for continuous polling of all modules.
+    for continuous polling of all modules. Initializing communication leaves
+    the modules DISABLED; the On/Off toggle enables/disables them
+    (set_enable, user order 2026-07-10).
     """
 
     name = 'DMMR8'
@@ -34,6 +36,7 @@ class DMMR8(Device):
     unit = 'pA'
     iconFile = 'DMMR8.png'
     useBackgrounds = True
+    useOnOffLogic = True
     channels: 'list[CurrentChannel]'
 
     # type hints for settings
@@ -62,6 +65,8 @@ class DMMR8(Device):
             channel.resetCharge()
 
     def closeCommunication(self) -> None:
+        self.setOn(False)
+        self.controller.toggleOnFromThread(parallel=False)
         super().closeCommunication()
 
 
@@ -144,7 +149,17 @@ class DMMR8Controller(DeviceController):
                 self.print(f'Failed to connect to DMMR-8 on COM{com}.', flag=PRINT.ERROR)
                 return
 
-            self.print(f'DMMR-8 initialized on COM{com} with {NUM_MODULES} modules.')
+            # The real-HW-proven bring-up (notebook 017, order untouchable) ends with the modules ENABLED —
+            # turn them back off so initialization leaves the device Off and only the user-facing On/Off
+            # toggle enables the modules (user order 2026-07-10). Acquisition has not started yet, so this
+            # runs in the same unlocked initialization context as connect() (ESI precedent).
+            # set_automatic_current stays True from bring-up: it is a measurement MODE (continuous polling),
+            # not an output enable — a disabled device simply yields NO_DATA in readNumbers.
+            status = self.pa.set_enable(False)
+            if status != self.pa.NO_ERR:
+                self.print(f'Could not disable modules after bring-up: status {status}', flag=PRINT.WARNING)
+
+            self.print(f'DMMR-8 initialized on COM{com} with {NUM_MODULES} modules (modules disabled — use the On/Off toggle).')
             self.signalComm.initCompleteSignal.emit()
         except Exception as e:  # noqa: BLE001
             self.print(f'Error initializing DMMR-8: {e}', flag=PRINT.ERROR)
@@ -163,6 +178,8 @@ class DMMR8Controller(DeviceController):
                 self.pa.connect()
         except Exception as e:  # noqa: BLE001
             self.print(f'Test Mode runs without telemetry device: {e}', flag=PRINT.DEBUG)
+        if self.pa is not None:
+            self.pa.set_enable(False)  # mirror runInitialization: init leaves the (simulated) modules disabled
         super().fakeInitialization()
 
     def _pushTelemetry(self) -> None:
@@ -245,6 +262,26 @@ class DMMR8Controller(DeviceController):
                 # Simulate slowly varying currents in pA range
                 self.values[i] = (np.sin(t / 10 + i * 1.5) * 5 + self.rng.random() * 0.5 + 10 + i * 3)
         self._pushTelemetry()
+
+    def toggleOn(self) -> None:
+        super().toggleOn()
+        if self.pa is None:
+            return
+        on = self.controllerParent.isOn()
+        try:
+            # Every DLL call must hold the controller lock — an unlocked call garbles the
+            # in-flight exchange of the locked read thread (-13 storms, 2026-07-05).
+            with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock to toggle DMMR-8 modules.') as lock_acquired:
+                if not lock_acquired:
+                    return
+                status = self.pa.set_enable(on)
+        except Exception as e:  # noqa: BLE001
+            self.print(f'Error toggling DMMR-8 modules: {e}', flag=PRINT.ERROR)
+            return
+        if status != self.pa.NO_ERR:
+            self.print(f'Failed to {"enable" if on else "disable"} DMMR-8 modules: status {status}', flag=PRINT.WARNING)
+        else:
+            self.hkPushTime = 0.0  # next read cycle pushes the new enable state to telemetry right away
 
     def closeCommunication(self) -> None:
         super().closeCommunication()  # stops acquisition first
