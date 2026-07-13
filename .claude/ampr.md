@@ -41,6 +41,27 @@ For each unique COM port found among channels:
 - Voltage set to 0 if channel disabled or device toggled Off
 - Routes to correct AMPR instance via channel's COM port
 
+### Apply serialization (2026-07-13)
+
+The framework spawns one thread per channel on every toggle/apply-all
+(`Device.setOn` → `updateValues(apply=True)` and `initComplete`); with many
+channels that herd starves the single serial lock — 1 s timeouts dropped sets
+silently on real HW. The controller therefore overrides `applyValueFromThread`:
+sets are queued (deduped per channel — the worker reads `channel.value` live)
+and drained by ONE `applyWorker` daemon thread, one serial exchange at a time.
+`applyValue` retries the lock (2 × 2 s) and prints a loud ERROR if the set is
+dropped (the framework has already stamped `lastAppliedValue`, so a dropped set
+is otherwise invisible). The queue is cleared in `closeCommunication`.
+
+### Enable robustness (2026-07-13)
+
+`toggleOn` goes through `_setPSUEnable` (3 × 2 s lock retries, checks status
+AND the enable readback). If any unit fails to enable, `_abortEnable` disables
+the units that did, prints an ERROR, and reverts the On toggle in the main
+thread via `revertOnSignal` — the plugin never pretends On while a PSU is
+actually disabled (that was the "values not applied, edits do nothing"
+real-HW symptom of 2026-07-13).
+
 ## Monitor Readback (readNumbers)
 
 - `ampr.get_measured_module_output_voltages(module_addr)` — returns all 4 measured voltages per module

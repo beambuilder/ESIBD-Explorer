@@ -1,8 +1,11 @@
 # pylint: disable=[missing-module-docstring]  # see class docstrings
+import queue
+import threading
 import time
 from typing import cast
 
 import numpy as np
+from PyQt6.QtCore import pyqtSignal
 
 from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, getTestMode, parameterDict
 from esibd.devices.com_helper import getComPort
@@ -15,7 +18,8 @@ def providePlugins() -> 'list[type[Plugin]]':
     return [AMPR12]
 
 
-HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, enable state) cadence; voltage telemetry stays on ChannelThrottle
+HK_PUSH_INTERVAL_S = 10  # electronics housekeeping (temps, enable state) cadence; voltage telemetry stays on ChannelThrottle
+APPLY_GAP_S = 0.05  # breathing room between queued voltage sets — back-to-back frames draw status -10 (no response) from the device
 
 
 class AMPR12(Device):
@@ -57,8 +61,7 @@ class AMPR12(Device):
         return list({channel.com for channel in self.channels if channel.real})
 
     def closeCommunication(self) -> None:
-        self.setOn(False)
-        self.controller.toggleOnFromThread(parallel=False)
+        self.setOn(False)  # Device.setOn already runs toggleOnFromThread(parallel=False) when initialized — no second toggle here
         super().closeCommunication()
 
 
@@ -105,15 +108,32 @@ class VoltageChannel(Channel):
 
 
 class VoltageController(DeviceController):
-    """Controller for AMPR-12 devices. Manages one AMPR instance per unique COM port."""
+    """Controller for AMPR-12 devices. Manages one AMPR instance per unique COM port.
+
+    All voltage sets are serialized through a single apply-worker thread: the framework
+    spawns one thread per channel on every toggle/apply-all (core.applyValueFromThread),
+    and with many channels that herd starves the one serial lock — sets time out and are
+    silently lost (real HW 2026-07-13).
+    """
 
     controllerParent: AMPR12
+
+    class SignalCommunicate(DeviceController.SignalCommunicate):
+        """Bundle pyqtSignals."""
+
+        revertOnSignal = pyqtSignal()
+        """Signal that reverts the device On toggle in the main thread after a failed PSU enable."""
 
     def __init__(self, controllerParent: AMPR12) -> None:
         super().__init__(controllerParent=controllerParent)
         self.amprs = {}  # COM port -> AMPR instance
         self.telemetryThrottle = ChannelThrottle()
         self.hkPushTimes = {}  # COM port -> last housekeeping push (epoch s)
+        self.applyQueue = queue.Queue()  # channels waiting for the apply worker
+        self._pendingApplies = set()  # channels queued but not yet applied (dedupe)
+        self._applyDispatchLock = threading.Lock()
+        self.applyWorker = None
+        self.signalComm.revertOnSignal.connect(self._revertOn)
         self.initCOMs()
 
     def _labDeviceName(self, com: int) -> str:
@@ -240,19 +260,70 @@ class VoltageController(DeviceController):
         except Exception as e:  # noqa: BLE001
             self.print(f'Housekeeping push failed for COM{com}: {e}', flag=PRINT.DEBUG)
 
+    def applyValueFromThread(self, channel: VoltageChannel) -> None:
+        # Queue for the single apply worker instead of spawning a thread per channel (see class docstring).
+        if getTestMode() or not self.initialized:
+            return
+        with self._applyDispatchLock:
+            if id(channel) in self._pendingApplies:  # id key: Channel extends QTreeWidgetItem, which is unhashable in PyQt6
+                return  # already queued; the worker reads channel.value live at apply time
+            self._pendingApplies.add(id(channel))
+            self.applyQueue.put(channel)
+            if self.applyWorker is None or not self.applyWorker.is_alive():
+                self.applyWorker = threading.Thread(target=self._runApplyWorker, name=f'{self.controllerParent.name} applyWorkerThread', daemon=True)
+                self.applyWorker.start()
+
+    def _runApplyWorker(self) -> None:
+        """Drain the apply queue, one serial exchange at a time; exits when idle (recreated on demand)."""
+        while True:
+            try:
+                channel = self.applyQueue.get(timeout=5)
+            except queue.Empty:
+                with self._applyDispatchLock:
+                    if self.applyQueue.empty():
+                        self.applyWorker = None  # deregister under the dispatch lock so a concurrent put spawns a fresh worker instead of getting lost
+                        return
+                continue
+            with self._applyDispatchLock:
+                self._pendingApplies.discard(id(channel))
+            if self.initialized:
+                self.applyValue(channel)
+                time.sleep(APPLY_GAP_S)
+
     def applyValue(self, channel: VoltageChannel) -> None:
         ampr = self.amprs.get(channel.com)
         if ampr is None:
             return
         voltage = channel.value if (channel.enabled and self.controllerParent.isOn()) else 0
-        with self.lock.acquire_timeout(1, timeoutMessage=f'Cannot acquire lock to set {channel.name}.') as lock_acquired:
-            if lock_acquired:
-                status = ampr.set_module_voltage(channel.module, channel.ch, voltage)
-                if status != ampr.NO_ERR:
-                    self.print(f'Error setting {channel.name}: status {status}', flag=PRINT.WARNING)
-                    self.errorCount += 1
-                else:
-                    self.print(f'Set {channel.name} to {voltage:.3f} V (COM{channel.com} mod{channel.module} ch{channel.ch})', flag=PRINT.TRACE)
+        for _ in range(2):  # a busy read-loop/housekeeping cycle may hold the lock; a dropped set is worse than a late one
+            with self.lock.acquire_timeout(2) as lock_acquired:
+                if lock_acquired:
+                    # call_with_retry purges the port and retries once on a nonzero status — a -10 (no response)
+                    # leaves stale bytes in the RX buffer that would desync the next exchange ([[cgc-ampr]])
+                    status = ampr.call_with_retry(ampr.set_module_voltage, channel.module, channel.ch, voltage)
+                    if status != ampr.NO_ERR:
+                        self.print(f'Error setting {channel.name}: status {status}', flag=PRINT.WARNING)
+                        self.errorCount += 1
+                    else:
+                        self.print(f'Set {channel.name} to {voltage:.3f} V (COM{channel.com} mod{channel.module} ch{channel.ch})', flag=PRINT.TRACE)
+                    return
+        self.print(f'Could not acquire lock to set {channel.name} — value NOT applied. Change the value again to retry.', flag=PRINT.ERROR)
+
+    def runAcquisition(self) -> None:
+        """Apply-aware framework loop: pending voltage sets get the serial lock first.
+
+        A read cycle that cannot get the lock (or finds sets pending) is skipped silently —
+        the next cycle, one interval later, covers it. The framework loop instead printed
+        'Could not acquire lock to acquire data' whenever a set burst held the lock, and its
+        bulk read made every live voltage edit wait out a full read cycle first.
+        """
+        while self.acquiring:
+            if self.applyQueue.empty():
+                with self.lock.acquire_timeout(1) as lock_acquired:
+                    if lock_acquired:
+                        self.fakeNumbers() if getTestMode() else self.readNumbers()
+                        self.signalComm.updateValuesSignal.emit()
+            time.sleep(self.getDevice().interval / 1000)
 
     def readNumbers(self) -> None:
         """Read measured voltages from all AMPR modules for monitor feedback."""
@@ -303,32 +374,86 @@ class VoltageController(DeviceController):
     def toggleOn(self) -> None:
         super().toggleOn()
         on = self.controllerParent.isOn()
+        failed = []
         for com, ampr in self.amprs.items():
             try:
-                # The DLL exchange rides the same serial channel as readNumbers/applyValue —
-                # an unlocked call garbles whatever exchange is in flight (status -13 storms
-                # observed on real hardware 2026-07-05), so every DLL call must hold the lock.
-                with self.lock.acquire_timeout(2, timeoutMessage=f'Cannot acquire lock to toggle PSU on COM{com}.') as lock_acquired:
-                    if not lock_acquired:
-                        continue
-                    psu_status, enabled = ampr.enable_psu(on)
-                if psu_status != ampr.NO_ERR:
-                    self.print(f'Failed to {"enable" if on else "disable"} PSU on COM{com}: status {psu_status}', flag=PRINT.WARNING)
-                else:
-                    self.print(f'AMPR-12 on COM{com}: PSU {"enabled" if enabled else "disabled"}')
-                    self.hkPushTimes[com] = 0.0  # next read cycle pushes the new enable state to telemetry right away
-                    if on and not enabled:
-                        self.print(f'AMPR-12 on COM{com}: device refused PSU enable — check the interlock.', flag=PRINT.WARNING)
+                if not self._setPSUEnable(com, ampr, on=on):
+                    failed.append(com)
             except Exception as e:  # noqa: BLE001
                 self.print(f'Error toggling PSU on COM{com}: {e}', flag=PRINT.ERROR)
-        if on:
-            # Give the device a moment to settle before pushing channel values.
-            time.sleep(0.2)
-            for channel in self.controllerParent.getChannels():
-                if channel.real:
-                    self.applyValueFromThread(channel)
+                failed.append(com)
+        if not on:
+            return
+        if failed:
+            self._abortEnable(failed)
+            return
+        # Give the device a moment to settle before pushing channel values.
+        time.sleep(0.2)
+        for channel in self.controllerParent.getChannels():
+            if channel.real:
+                self.applyValueFromThread(channel)  # queued: applied one by one by the apply worker
+
+    def _abortEnable(self, failed: list[int]) -> None:
+        """Disable the units that did enable and revert the On toggle — never pretend On.
+
+        :param failed: COM ports whose PSU enable failed.
+        :type failed: list[int]
+        """
+        for com, ampr in self.amprs.items():
+            if com not in failed:
+                try:
+                    self._setPSUEnable(com, ampr, on=False)
+                except Exception as e:  # noqa: BLE001
+                    self.print(f'Error disabling PSU on COM{com}: {e}', flag=PRINT.ERROR)
+        self.print(f'PSU enable failed on COM{failed} — reverting to Off.', flag=PRINT.ERROR)
+        self.signalComm.revertOnSignal.emit()
+
+    def _setPSUEnable(self, com: int, ampr, on: bool) -> bool:
+        """Send the PSU enable/disable for one unit. True only when the device confirms the requested state.
+
+        The DLL exchange rides the same serial channel as readNumbers/applyValue —
+        an unlocked call garbles whatever exchange is in flight (status -13 storms
+        observed on real hardware 2026-07-05), so every DLL call must hold the lock.
+
+        :param com: COM port of the unit.
+        :type com: int
+        :param ampr: esibd_bs AMPR instance for that port.
+        :param on: Requested PSU enable state.
+        :type on: bool
+        :return: True if the device confirmed the requested state.
+        :rtype: bool
+        """
+        for _ in range(3):  # the read loop may hold the lock through a housekeeping cycle — retry instead of silently skipping the enable
+            with self.lock.acquire_timeout(2) as lock_acquired:
+                if not lock_acquired:
+                    continue
+                psu_status, enabled = ampr.enable_psu(on)
+                if psu_status != ampr.NO_ERR:
+                    self.print(f'Failed to {"enable" if on else "disable"} PSU on COM{com}: status {psu_status}', flag=PRINT.WARNING)
+                    return False
+                self.print(f'AMPR-12 on COM{com}: PSU {"enabled" if enabled else "disabled"}')
+                self.hkPushTimes[com] = 0.0  # next read cycle pushes the new enable state to telemetry right away
+                if on and not enabled:
+                    self.print(f'AMPR-12 on COM{com}: device refused PSU enable — check the interlock '
+                               '(after a module change, run the vendor module init first).', flag=PRINT.WARNING)
+                    return False
+                return True
+        self.print(f'Cannot acquire lock to {"enable" if on else "disable"} PSU on COM{com}.', flag=PRINT.ERROR)
+        return False
+
+    def _revertOn(self) -> None:
+        """Flip the On toggle back Off after a failed enable (runs in the main thread)."""
+        self.controllerParent.setOn(False)
 
     def closeCommunication(self) -> None:
+        with self._applyDispatchLock:
+            # pending sets are pointless once the PSUs go down — drop them so the worker cannot touch a disconnecting device
+            while not self.applyQueue.empty():
+                try:
+                    self.applyQueue.get_nowait()
+                except queue.Empty:
+                    break
+            self._pendingApplies.clear()
         super().closeCommunication()  # stops acquisition first
         for com, ampr in self.amprs.items():
             with self.lock.acquire_timeout(2, timeoutMessage=f'Cannot acquire lock to close COM{com}.'):
