@@ -14,10 +14,11 @@
     "Chiller_C": 20,
     "HiPace_QMS": 27,
     "HiPace_Transfer": 21,
-    "HiPace_Depo": 22,
+    "HiPace_Depo": 24,
     "TPG_366": 25,
     "HiScroll_1": 32,
-    "HiScroll_2": 33,
+    "HiScroll_2": 22,
     "Arduino_Pump": 31,
-    "Arduino_Trafo": 34
+    "Arduino_Trafo": 34,
+    "Syringe_Pump": 29
 }
