@@ -5,7 +5,8 @@ import time
 from typing import cast
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QSpinBox
 
 from esibd.core import PARAMETERTYPE, PLUGINTYPE, PRINT, Channel, DeviceController, Parameter, getTestMode, getValidConfigPath, parameterDict
 from esibd.devices.com_helper import getComPort
@@ -19,7 +20,12 @@ def providePlugins() -> 'list[type[Plugin]]':
 
 
 HK_PUSH_INTERVAL_S = 30  # electronics housekeeping (temps, activation state) cadence; voltage telemetry stays on ChannelThrottle
-STANDBY_CONFIG = 1  # NVM park slot (DLL 0-based: 0 = 'Off', 1 = 'Standby' — device off, HV modules enabled, output 0)
+OFF_CONFIG = 0  # NVM park slot (DLL 0-based: 0 = 'Off' — device + all modules off); park target after init, on Enable-off and on close (user 2026-07-28)
+STANDBY_CONFIG = 1  # Config-dropdown default/fallback slot ('Standby' — device off, HV modules enabled, output 0); NOT the park slot — a fallback
+#                     to 'Off' would make Enable a silent no-op (the SW plugin's historical dropdown-resolved-to-standby bug)
+NVM_SETTLE_S = 2  # NVM writes (save slot, set name) may keep the controller busy — no traffic during this window (SW precedent; skipped in Test Mode)
+MAX_CONFIG_SLOT = 1022  # DLL MAX_CONFIG = 1023 slots, 0-based
+CONFIG_NAME_MAX = 201  # DLL CONFIG_NAME_SIZE = 202 incl. the terminating NUL
 HEATER_MAX_C = 175.0  # top of the shipped 'Heat 30..175deg' config ladder
 HEATER_SAFE_TEMP_C = 50.0  # below this a manual target needs the reduced power limit first (overshoot, CGC 2026-07-21)
 HEATER_SAFE_POWER_W = 20.0  # power limit applied before sub-50 degC manual targets (10-30 W rule; Standby leaves 180 W armed)
@@ -93,11 +99,15 @@ class ESI(Device):
     loads it the same way. THE CONFIG IS THE TRUTH (user decision 2026-07-27): after
     every load the channel voltages and the heater-temperature setting sync FROM the
     device (a load clobbers manual targets — hardware-proven), then user edits write
-    through live. Off parks the device in the Standby config (slot 1: output 0, heater
-    off, HV modules enabled; user decision 2026-07-27), with set_enable(False) as the
-    loud fallback if the park load fails. The heater target lives in the device
-    settings ('Heater temperature'); a manual target below 50 degC applies the reduced
-    20 W power limit first (overshoot rule — the Standby trap leaves 180 W armed).
+    through live. The device parks in the Off config (slot 0: device + all modules
+    off; user decision 2026-07-28, supersedes Standby slot 1 of 2026-07-27) at ALL
+    park points — right after init (the esibd_bs bring-up leaves the device enabled),
+    on Enable-off and on close — with set_enable(False) as the loud fallback if the
+    park load fails. The heater target lives in the device settings ('Heater
+    temperature'); a manual target below 50 degC applies the reduced 20 W power limit
+    first (overshoot rule — the Standby trap leaves 180 W armed). The Save toolbar
+    action stores the LIVE working set to a user-chosen NVM slot + name (SW-plugin
+    precedent; requires On — a parked device would store the Off working set).
 
     The ESI-CTRL DLL is SINGLE-INSTANCE per process (no port argument in its exports):
     one controller, one COM port, and never this plugin and an ESI notebook at the
@@ -105,7 +115,7 @@ class ESI(Device):
     """
 
     name = 'ESI'
-    version = '1.1'
+    version = '1.2'
     supportedVersion = '1.0'
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = 'nA'  # unit of the plotted/recorded channel data (measured current); set values are volts (see HVChannel headers)
@@ -128,7 +138,47 @@ class ESI(Device):
         super().initGUI()
         self.addAction(event=lambda: self.controller.listConfigs(), toolTip='List the NVM config slots (index + name) of the ESI controller in the Console.',
                        icon='configs.png')
+        self.addAction(event=lambda: self.saveConfigDialog(), toolTip='Save the CURRENT working set (HV targets, heater temperature, module enables)\n'
+                       'to an NVM config slot. Requires On — a parked device would store the Off working set.',
+                       icon='saveconfig.png')
         self.controller = ESIController(controllerParent=self)
+
+    def saveConfigDialog(self) -> None:
+        """Ask for slot number + name, then store the current working set in the controller NVM (user request 2026-07-28; SW-plugin precedent)."""
+        if not self.controller.initialized or self.controller.esi is None:
+            self.print('Initialize communication first — the save action stores the LIVE working set of the ESI controller.', flag=PRINT.WARNING)
+            return
+        if not self.isOn():
+            self.print('Device is Off (parked in the Off config) — saving now would store the parked working set. '
+                       'Switch On and set up the working set first.', flag=PRINT.WARNING)
+            return
+        items = self.controller.configItems or []
+        occupants = {configIndex(item): item for item in items}
+        dialog = QDialog(self, Qt.WindowType.WindowStaysOnTopHint)
+        dialog.setWindowTitle('Save working set to NVM config')
+        layout = QFormLayout(dialog)
+        slotBox = QSpinBox()
+        slotBox.setRange(2, MAX_CONFIG_SLOT)  # slot 0 = Off (park target) and slot 1 = Standby (dropdown fallback), both protected
+        used = {index for index in occupants if index is not None}
+        slotBox.setValue(next((i for i in range(100, MAX_CONFIG_SLOT + 1) if i not in used), 100))  # suggest a free slot above the shipped ladder
+        nameEdit = QLineEdit()
+        nameEdit.setMaxLength(CONFIG_NAME_MAX)
+        nameEdit.setPlaceholderText('e.g. Reserpine_150C_65V')
+        occupantLabel = QLabel()
+
+        def updateOccupant() -> None:
+            occupantLabel.setText(f"overwrites: '{occupants[slotBox.value()]}'" if slotBox.value() in occupants else 'slot is free')
+        slotBox.valueChanged.connect(updateOccupant)
+        updateOccupant()
+        layout.addRow('Slot (DLL index)', slotBox)
+        layout.addRow('Name', nameEdit)
+        layout.addRow('', occupantLabel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec():
+            self.controller.saveWorkingSet(slotBox.value(), nameEdit.text().strip())
 
     def getChannels(self) -> 'list[HVChannel]':
         return cast('list[HVChannel]', super().getChannels())
@@ -297,12 +347,15 @@ class ESIController(DeviceController):
             self.esi = ESIDevice(device_id='ESI', com=com, baudrate=230400, sink=sink)
 
             # connect() runs the bring-up (open -> set_comspeed -> set_enable) and
-            # claims the process-wide single-instance slot (P6.5). The device comes up
-            # in whatever state it was left — activation is config-driven since 1-00.
+            # claims the process-wide single-instance slot (P6.5). The bring-up leaves
+            # the device ENABLED, so it is parked in the Off config right away —
+            # activation is config-driven since 1-00 (user 2026-07-28).
             if not self.esi.connect():
                 self.print(f'Failed to connect to ESI controller on COM{com}.', flag=PRINT.ERROR)
                 self.esi = None
                 return
+
+            self._parkAtInit()
 
             # Discover present modules so we can warn if a configured channel points at a missing module.
             present_status, _, max_module, presence_list = self.esi.get_module_presence()
@@ -340,6 +393,7 @@ class ESIController(DeviceController):
         except Exception as e:  # noqa: BLE001
             self.print(f'Test Mode runs without telemetry device: {e}', flag=PRINT.DEBUG)
         if self.esi is not None:
+            self._parkAtInit()
             # the ESI sim models the NVM (SIM_CONFIG_NAMES) — the real enumeration path works in Test Mode
             self.configItems = self._enumerateConfigs()
             self.signalComm.configListsChangedSignal.emit()
@@ -646,22 +700,64 @@ class ESIController(DeviceController):
         except Exception as e:  # noqa: BLE001
             self.print(f'Error toggling the ESI controller: {e}', flag=PRINT.ERROR)
 
-    def _parkLocked(self) -> None:
-        """Off: park the device in the Standby config (slot 1 — output 0, heater off, HV modules enabled; user decision 2026-07-27).
+    def _parkAtInit(self) -> None:
+        """Park in the Off config right after connect — the bring-up (set_enable in _open_transport) leaves the device enabled."""
+        with self.lock.acquire_timeout(2, timeoutMessage='Cannot acquire lock to park the ESI controller after init — verify the device state at the bench.') \
+                as lock_acquired:
+            if lock_acquired:
+                self._parkLocked()
 
-        Caller must hold the controller lock. The Config dropdown is deliberately NOT
-        snapped to Standby — it keeps the user's selection, which the next On loads.
-        A failed park falls back to set_enable(False) (main state STBY) and is loud.
+    def _parkLocked(self) -> None:
+        """Park the device in the Off config (slot 0 — device + all modules off; user decision 2026-07-28, supersedes Standby slot 1).
+
+        Runs after init, on Enable-off and on close. Caller must hold the controller
+        lock. The Config dropdown is deliberately NOT snapped — it keeps the user's
+        selection, which the next On loads. A failed park falls back to
+        set_enable(False) (main state STBY) and is loud.
         """
         if self.esi is None:
             return
-        status = self.esi.load_current_config(STANDBY_CONFIG)
+        status = self.esi.load_current_config(OFF_CONFIG)
         if status != self.esi.NO_ERR:
-            self.print(f'PARK NOT CONFIRMED: Standby config load returned {status} — falling back to set_enable(False).', flag=PRINT.ERROR)
+            self.print(f'PARK NOT CONFIRMED: Off config load returned {status} — falling back to set_enable(False).', flag=PRINT.ERROR)
             fallback_status = self.esi.set_enable(False)
             if fallback_status != self.esi.NO_ERR:
                 self.print(f'set_enable(False) fallback returned {fallback_status} — verify the device state at the bench.', flag=PRINT.ERROR)
         self.hkPushTime = 0.0  # next read cycle pushes the new activation state to telemetry right away
+
+    def saveWorkingSet(self, slot: int, name: str) -> None:
+        """Store the CURRENT working set in NVM slot + name it, then refresh the dropdown (thread safe, user 2026-07-28).
+
+        Deltas vs the SW precedent: no test-mode branch (the esibd_bs ESI sim models
+        the NVM end-to-end — save/name/list/get all work on _sim_config_names) and no
+        call_with_retry (DLL bridge, not a serial-family device). The settle sleeps
+        are skipped in Test Mode to keep headless verification fast.
+        """
+        def save() -> None:
+            with self.lock.acquire_timeout(10, timeoutMessage=f'Cannot acquire lock to save config {slot}.') as lock_acquired:
+                if not lock_acquired:
+                    return
+                status = self.esi.save_current_config(slot)
+                if status != self.esi.NO_ERR:
+                    self.print(f'Failed to save the working set to slot {slot}: status {status}', flag=PRINT.ERROR)
+                    return
+                if not self.esi.test_mode:
+                    time.sleep(NVM_SETTLE_S)  # NVM write — no traffic until settled
+                if name:
+                    name_status = self.esi.set_config_name(slot, name)
+                    if name_status != self.esi.NO_ERR:
+                        self.print(f'Config saved, but naming slot {slot} failed: status {name_status}', flag=PRINT.WARNING)
+                    if not self.esi.test_mode:
+                        time.sleep(NVM_SETTLE_S)
+                items = self._enumerateConfigs()
+                if items:
+                    self.configItems = items
+                self.print(f"Working set saved to NVM slot {slot} ('{name or '<unnamed>'}').")
+            self.signalComm.configListsChangedSignal.emit()
+        if self.esi is not None:
+            threading.Thread(target=save, name=f'{self.controllerParent.name} saveConfigThread', daemon=True).start()
+        else:
+            self.print('ESI controller not connected.', flag=PRINT.WARNING)
 
     def listConfigs(self) -> None:
         """List the populated NVM config slots (index + device-stored name) in the Console and refresh the Config dropdown."""
