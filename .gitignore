@@ -50,3 +50,8 @@ logs/
 # large media files
 docs/pages/esibd.pptx
 esibd/media/icon.pptx
+
+# Graphify derived code index — disposable, rebuildable, never tracked
+graphify-out/
+.graphify_analysis.json
+.graphify_labels.json
