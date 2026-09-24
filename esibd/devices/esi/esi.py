@@ -400,18 +400,23 @@ class ESIController(DeviceController):
         super().fakeInitialization()
 
     def _enumerateConfigs(self) -> 'list[str] | None':
-        """Read the populated NVM config slots (index + name) of the controller.
+        """Read the ACTIVE NVM config slots (index + name) of the controller.
+
+        Only active slots are listed: the controller keeps deleted configs recoverable
+        (vendor 'undelete'), so they stay in the VALID list and would show up as ghosts
+        of a previous config set — the controller came back from CGC in 2026-09 with 44
+        active and 219 deleted slots (fixed 2026-09-23).
 
         Returns None on failure so the dropdown keeps its last known list. Commas in
         device-stored names are replaced (the COMBO items string is comma-separated).
         """
         try:
-            status, _active, valid = self.esi.list_configs()
+            status, active, _valid = self.esi.list_configs()
             if status != self.esi.NO_ERR:
                 self.print(f'list_configs failed (status {status}) — keeping the last known config list.', flag=PRINT.WARNING)
                 return None
             items = []
-            for index in valid:
+            for index in active:
                 name_status, name = self.esi.get_config_name(index)
                 items.append(f'{index}: {name.replace(",", ";")}' if name_status == self.esi.NO_ERR and name else f'{index}: <unnamed>')
         except Exception as e:  # noqa: BLE001
@@ -423,16 +428,17 @@ class ESIController(DeviceController):
         """Replace the Config dropdown items with the freshly enumerated NVM list (runs in the main thread).
 
         Selections are re-matched by config index (a renamed slot updates silently); a
-        vanished index falls back to Standby with a warning. Real enumerations refresh
-        the on-disk cache that seeds the dropdown at the next start.
+        vanished index falls back to Standby with a warning. Real enumerations REPLACE
+        the on-disk cache that seeds the dropdown at the next start — the enumerated
+        list is the whole truth, so entries of other ports (and of a previous config
+        set on this one) are dropped instead of merged (user 2026-09-23: refreshing
+        must overwrite the list completely).
         """
         items = self.configItems
         if not items:
             return
         if not getTestMode():
-            cache = loadConfigCache()
-            cache[str(self.controllerParent.comPort)] = items
-            saveConfigCache(cache)
+            saveConfigCache({str(self.controllerParent.comPort): items})
         device = self.controllerParent
         device.syncingConfig = True
         try:
